@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:15
+    container_name: erp_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: erp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - erp_network
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: ${BUILD_TARGET:-runtime}   # permite alternar entre dev e prod
+    container_name: erp_api
+    restart: always
+    depends_on:
+      - db
+    env_file:
+      - .env.dev
+    ports:
+      - "3000:3000"
+      - "5555:5555" 
+    volumes:
+      - ./uploads:/usr/src/app/uploads
+      - ./logs:/usr/src/app/logs
+      # Só mapeia src e prisma em modo dev
+      - ./src:/usr/src/app/src:cached
+      - ./prisma:/usr/src/app/prisma:cached
+    networks:
+      - erp_network
+    command: ["./entrypoint.sh"]
+    environment:
+      DATABASE_URL: "postgresql://postgres:postgres@db:5432/erp?schema=public"
+
+volumes:
+  postgres_data:
+  uploads:
+  logs:
+
+networks:
+  erp_network:
+    driver: bridge

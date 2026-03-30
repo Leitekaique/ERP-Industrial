@@ -1,0 +1,844 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "windows", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model CatalogProduct {
+  id          String   @id @default(uuid())
+  tenantId    String
+  companyId   String
+  sku         String
+  ownerType   String?
+  code        String?
+  name        String
+  unit        String?
+  ncm         String?
+  cfop        String?
+  price       Decimal  @default(0.0)
+  description String?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId, companyId])
+  @@map("catalog_product")
+}
+
+model Company {
+  id               String           @id @default(uuid())
+  tenantId         String
+  legalName        String
+  tradeName        String?
+  cnpj             String           @unique
+  ie               String?
+  cnae             String?
+  certA1Keystore   Bytes?
+  certA1Password   String?
+  address          String?
+  number           String?          // Número do logradouro
+  district         String?          // Bairro
+  city             String?
+  cityCode         String?          // Código IBGE do município
+  uf               String?
+  zip              String?          // CEP
+  phone            String?
+  email            String?
+  crt              String?          @default("1") // Código de Regime Tributário: 1=SN, 3=LP
+  icmsSnRate       Decimal?         // Alíquota de crédito ICMS Simples Nacional (ex: 1.25)
+  ibptFederalPct   Decimal?         // Alíquota IBPT federal (atualizada semanalmente)
+  ibptEstadualPct  Decimal?         // Alíquota IBPT estadual (atualizada semanalmente)
+  ibptUpdatedAt    DateTime?        // Última atualização das alíquotas IBPT
+  payableCategories Json?           // Lista de categorias personalizadas para A Pagar (string[])
+  createdAt        DateTime         @default(now())
+  tenant           Tenant           @relation(fields: [tenantId], references: [id])
+  customers        Customer[]
+  nfe              Nfe[]
+  payables         Payable[]
+  // PRODUTOS — agora separados em duas relações
+  productsSistema  Product[]        @relation("EmpresaSistema")
+  receivables      Receivable[]
+  billings         Billing[]
+  stockMovements   StockMovement[]
+  suppliers        Supplier[]
+  warehouses       Warehouse[]
+  stockLotsSistema StockLot[]       @relation("LotEmpresaSistema")
+  processes        Process[]
+  processHistories ProcessHistory[] @relation("ProcessHistoryEmpresa")
+
+  @@index([tenantId])
+}
+
+model Customer {
+  id              String          @id @default(uuid())
+  tenantId        String
+  companyId       String
+  document        String?         @unique
+  name            String
+  email           String?
+  emailFinanceiro String?
+  emailAdicional1 String?
+  emailAdicional2 String?
+  address         String?
+  createdAt       DateTime        @default(now())
+  ie              String?
+  zip             String?
+  city            String?
+  cityCode        String?
+  complement      String?
+  country         String?
+  countryCode     String?
+  crt             String?
+  district        String?
+  fantasyName     String?
+  im              String?
+  isActive        Boolean         @default(true)
+  notes           String?
+  number          String?
+  phone           String?
+  state           String?
+  updatedAt       DateTime        @default(now()) @updatedAt
+  docType         String?
+  paymentTermDay  Int?            // Legado — mantido para compatibilidade
+  billingTerms    String?         // Prazo de cobrança: "dia15"|"dia20"|"7d"|"15d"|"28d"|"45d"
+  accountantEmail String?         // E-mail do contador (campo global Tapajós — não exibir no form do cliente)
+  company         Company         @relation(fields: [companyId], references: [id])
+  tenant          Tenant          @relation(fields: [tenantId], references: [id])
+  nfe             Nfe[]           @relation("NfeCustomer")
+  receivables     Receivable[]
+  billings        Billing[]
+  stockMovements  StockMovement[]
+  products        Product[]
+  processes       Process[]
+
+  @@index([document])
+  @@index([tenantId, companyId])
+}
+
+model NfeImport {
+  id           String   @id @default(uuid())
+  tenantId     String
+  companyId    String
+  accessKey    String   @unique
+  emitente     String
+  destinatario String
+  valorTotal   Decimal  @db.Decimal(18, 2)
+  dataEmissao  DateTime
+  xmlPath      String
+  createdAt    DateTime @default(now())
+  nfNumber      String?  // ide.nNF
+  serie         String?  // ide.serie
+  modelo        String?  // ide.mod (opcional)
+
+  @@index([tenantId, companyId])
+}
+
+model NfeEmit {
+  id                 String   @id @default(uuid())
+  tenantId           String
+  companyId          String
+  numeroNF           String
+  serie              String?  @default("1")
+  xmlPath            String?
+  valorTotal         Float
+  destinatario       String
+  status             String   @default("Pendente") // Pendente | Autorizada | Cancelada
+  dataEmissao        DateTime @default(now())
+  createdAt          DateTime @default(now())
+  transportadora     String?
+  cnpjTransportadora String?
+
+  @@index([tenantId, companyId])
+}
+
+model Nfe {
+  id                 String     @id @default(uuid())
+  tenantId           String
+  companyId          String
+  customerId         String?
+  supplierId         String?
+
+  // numeração
+  number             Int?
+  series             Int?
+
+  // status / datas
+  status             NfeStatus  @default(draft)
+  issuedAt           DateTime?
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @default(now()) @updatedAt
+
+  // XML/PDF/SEFAZ
+  xmlPath            String?
+  pdfPath            String?
+  sefazProtocol      String?
+  sefazMsg           String?
+
+  // =========================
+  // ✅ Dados da operação (IDE)
+  // =========================
+  naturezaOperacao   String?    // ide.natOp (ex: Remessa p/ industrialização, reprocesso, venda...)
+  finalidade         String?    // ide.finNFe (string p/ não travar; depois se quiser vira enum)
+  tipoNf             String?    // ide.tpNF (0 entrada / 1 saída)
+  ambiente           String?    // ide.tpAmb (1 prod / 2 homolog) se você quiser guardar
+  municipioFatoGerador String?  // ide.cMunFG (opcional)
+  ufFatoGerador      String?    // ide.cUF (opcional)
+
+  // =========================
+  // ✅ Totais (ICMSTot)
+  // =========================
+  totalProducts      Decimal    @default(0) @db.Decimal(14, 2) // vProd
+  totalTax           Decimal    @default(0) @db.Decimal(14, 2) // se você usar; senão mantém 0
+  totalInvoice       Decimal    @default(0) @db.Decimal(14, 2) // vNF
+
+  totalTribApprox    Decimal?   @db.Decimal(14, 2) // vTotTrib (total aproximado tributos)
+
+  // =========================
+  // ✅ Frete (entra na NF só quando Tapajós cobra)
+  // =========================
+  freightPayer       NfeFreightPayer? // modFrete mapeado (recomendado)
+  freightValue       Decimal?   @db.Decimal(14, 2) // vFrete
+  insuranceValue     Decimal?   @db.Decimal(14, 2) // vSeg
+  discountValue      Decimal?   @db.Decimal(14, 2) // vDesc
+  otherValue         Decimal?   @db.Decimal(14, 2) // vOutro
+
+  // transportadora (snapshot completo)
+  transportadora          String?
+  cnpjTransportadora      String?
+  ieTransportadora        String?
+  endTransportadora       String?
+  municipioTransportadora String?
+  ufTransportadora        String?
+
+  vehiclePlate       String?
+  vehicleUf          String?
+
+  volumesQty         Int?
+  volumesSpecies     String?
+  volumesBrand       String?
+
+  weightGross        Decimal?   @db.Decimal(14, 3)
+  weightNet          Decimal?   @db.Decimal(14, 3)
+
+  // =========================
+  // ✅ Snapshots (emitente/destinatário)
+  // (pra resolver “campos não populados” e garantir histórico)
+  // =========================
+  emitRazaoSocial    String?
+  emitCnpj           String?
+  emitIe             String?
+  emitEndereco       String?
+  emitBairro         String?
+  emitCep            String?
+  emitMunicipio      String?
+  emitUf             String?
+  emitFone           String?
+
+  destRazaoSocial    String?
+  destCnpjCpf        String?
+  destIe             String?
+  destEndereco       String?
+  destBairro         String?
+  destCep            String?
+  destMunicipio      String?
+  destUf             String?
+  destFone           String?
+  destEmail          String?
+
+  // =========================
+  // ✅ Chave de acesso persistida
+  // =========================
+  cNFCode            String?          // cNF: 8 dígitos, gerado 1x e persistido (evita chave inconsistente)
+  refNFe             String?          // NFref: chave da NF de entrada referenciada (obrigatório para CFOP 5902)
+
+  // =========================
+  // ✅ Cobrança (fat/dup)
+  // =========================
+  billingNumber      String?          // cobr.fat.nFat
+  billingOriginal    Decimal? @db.Decimal(14, 2) // cobr.fat.vOrig
+  billingDiscount    Decimal? @db.Decimal(14, 2) // cobr.fat.vDesc
+  billingNet         Decimal? @db.Decimal(14, 2) // cobr.fat.vLiq
+
+  // relações
+  company            Company    @relation(fields: [companyId], references: [id])
+  customer           Customer?  @relation("NfeCustomer", fields: [customerId], references: [id])
+  supplier           Supplier?  @relation("NfeSupplier", fields: [supplierId], references: [id])
+  tenant             Tenant     @relation(fields: [tenantId], references: [id])
+
+  events             NfeEvent[]
+  items              NfeItem[]
+  receivables        Receivable[]
+  processHistories   ProcessHistory[]
+
+  duplicates         NfeDuplicate[]
+  payments           NfePayment[]
+
+  @@unique([tenantId, companyId, series, number])
+  @@index([tenantId, companyId, status])
+  @@index([customerId])
+  @@index([supplierId])
+}
+
+model NfeItem {
+  id            String   @id @default(uuid())
+  nfeId         String
+  productId     String?
+  sku           String?
+  description   String
+  cfop          String?
+  ncm           String?
+
+  qty           Decimal  @db.Decimal(14, 4)
+  unit          String?
+  unitPrice     Decimal  @db.Decimal(14, 4)
+  total         Decimal  @db.Decimal(14, 2)
+
+  // mantém compatibilidade (e guarda o “bruto”)
+  taxes         Json?
+
+  // =========================
+  // ✅ Fiscais estruturados (por item)
+  // =========================
+  taxOrig       Int?                 // ICMS orig
+  taxCsosn      String?              // ICMS CSOSN (ex: 101, 102, 400...)
+  taxPisCst     String?              // PIS CST (ex: 08)
+  taxCofinsCst  String?              // COFINS CST (ex: 08)
+  taxIpiCst     String?              // IPI CST (ex: 53)
+  taxIpiEnq     String? @default("999") // cEnq (muito comum 999 no seu XML)
+  taxTotTrib    Decimal? @db.Decimal(14, 2) // imposto.vTotTrib (por item)
+
+  // opcionais por item (existem em alguns XMLs)
+  itemFreight   Decimal? @db.Decimal(14, 2) // det.prod.vFrete (quando houver)
+  itemDiscount  Decimal? @db.Decimal(14, 2) // det.prod.vDesc
+  itemOther     Decimal? @db.Decimal(14, 2) // det.prod.vOutro
+  itemInsurance Decimal? @db.Decimal(14, 2) // det.prod.vSeg
+
+  // Tipo do item para cálculo de cobrança: "BASE" (produto cliente) | "PMO" (serviço/MO) | "INSUMO" (material adicionado)
+  kind          String?  @default("BASE")
+
+  nfe           Nfe      @relation(fields: [nfeId], references: [id], onDelete: Cascade)
+
+  @@index([nfeId])
+}
+
+model NfeDuplicate {
+  id        String   @id @default(uuid())
+  nfeId     String
+  number    String?  // dup.nDup
+  dueDate   DateTime? // dup.dVenc
+  value     Decimal? @db.Decimal(14, 2) // dup.vDup
+
+  nfe       Nfe      @relation(fields: [nfeId], references: [id], onDelete: Cascade)
+
+  @@index([nfeId])
+}
+
+model NfePayment {
+  id          String   @id @default(uuid())
+  nfeId       String
+
+  method      String?  // detPag.tPag (ex: 01, 03, 04, 99...)
+  value       Decimal? @db.Decimal(14, 2) // detPag.vPag
+  description String?  // se você quiser guardar algo “amigável”
+
+  nfe         Nfe      @relation(fields: [nfeId], references: [id], onDelete: Cascade)
+
+  @@index([nfeId])
+}
+
+model NfeEvent {
+  id        String       @id @default(uuid())
+  nfeId     String
+  type      NfeEventType
+  payload   Json?
+  protocol  String?
+  status    String?
+  createdAt DateTime     @default(now())
+  nfe       Nfe          @relation(fields: [nfeId], references: [id], onDelete: Cascade)
+
+  @@index([nfeId, type])
+}
+
+model Payment {
+  id           String     @id @default(uuid())
+  receivableId String
+  paidAt       DateTime
+  amount       Decimal    @db.Decimal(14, 2)
+  details      Json?
+  receivable   Receivable @relation(fields: [receivableId], references: [id], onDelete: Cascade)
+
+  @@index([receivableId, paidAt])
+}
+
+model Payable {
+  id            String           @id @default(uuid())
+  tenantId      String
+  companyId     String
+  supplierId    String
+  nfeReceivedId String?
+  dueDate       DateTime
+  amount        Decimal          @db.Decimal(14, 2)
+  status        PayableStatus    @default(open)
+  paymentMethod PaymentMethod?
+  category      String?          // categoria livre: ex. "Matéria prima", "Frete", "Energia elétrica"
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @default(now()) @updatedAt
+  company       Company          @relation(fields: [companyId], references: [id])
+  supplier      Supplier         @relation(fields: [supplierId], references: [id])
+  tenant        Tenant           @relation(fields: [tenantId], references: [id])
+  payments      PayablePayment[]
+
+  @@index([tenantId, companyId, status])
+  @@index([supplierId, dueDate])
+}
+
+model PayablePayment {
+  id        String   @id @default(uuid())
+  payableId String
+  paidAt    DateTime
+  amount    Decimal  @db.Decimal(14, 2)
+  details   Json?
+  createdAt DateTime @default(now())
+  payable   Payable  @relation(fields: [payableId], references: [id], onDelete: Cascade)
+
+  @@index([payableId, paidAt])
+}
+
+model Process {
+  id         String @id @default(uuid())
+  tenantId   String
+  companyId  String // Tapajós (empresa do sistema)
+  customerId String // Empresa para quem o processo é cobrado
+
+  name        String // Ex: Dublagem, Laminação, Refile
+  description String?
+
+  // Informações técnicas do processo
+  artigo String?
+  forro  String?
+  cola   String?
+
+  // Comercial
+  unit  String  @default("M") // unidade fixa
+  price Decimal @db.Decimal(14, 2)
+
+  active Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant   Tenant    @relation(fields: [tenantId], references: [id])
+  company  Company   @relation(fields: [companyId], references: [id])
+  customer Customer? @relation(fields: [customerId], references: [id])
+  processHistories ProcessHistory[]
+
+  @@unique([tenantId, companyId, customerId, name])
+  @@index([tenantId, companyId])
+  @@index([customerId])
+  @@map("process")
+}
+
+model ProcessHistory {
+  id String @id @default(uuid())
+  tenantId  String
+  companyId String
+  empresaId String // 🔥 NOVO: empresa dona do evento
+  empresa   Company @relation("ProcessHistoryEmpresa", fields: [empresaId], references: [id])
+  // contexto comercial
+  customerId      String?
+  processId       String?
+  processSnapshot Json?
+  // contexto físico
+  productId String?
+  quantity  Decimal? @db.Decimal(18, 6)
+  unit      String?
+  // contexto fiscal
+  nfEntradaId String?
+  nfSaidaId   String?
+  // tipo do evento
+  type   ProcessHistoryType
+  status ProcessHistoryStatus
+  reference String?
+  createdAt DateTime @default(now())
+  nfEntrada String?
+  
+  product   Product?  @relation(fields: [productId], references: [id])
+  process   Process?  @relation(fields: [processId], references: [id])
+  nfSaida   Nfe?      @relation(fields: [nfSaidaId], references: [id])
+
+
+  @@index([tenantId, companyId])
+  @@index([productId])
+  @@index([processId])
+  @@index([nfEntradaId])
+  @@index([nfSaidaId])
+}
+
+model Product {
+  id         String   @id @default(uuid())
+  tenantId   String
+  companyId  String
+  supplierId String?
+  customerId String?
+  empresaId  String
+  sku        String
+  name       String
+  ncm        String?
+  osn        String?
+  cfop       String?
+  processo   String?
+  unit       String?  @default("M")
+  price      Decimal  @db.Decimal(14, 2)
+  taxes      Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  // Relações
+  company        Company         @relation("EmpresaSistema", fields: [companyId], references: [id])
+  tenant         Tenant          @relation(fields: [tenantId], references: [id])
+  supplier       Supplier?       @relation(fields: [supplierId], references: [id])
+  customer       Customer?       @relation(fields: [customerId], references: [id])
+  stockMovements StockMovement[]
+  stockLots      StockLot[]
+  processHistories ProcessHistory[]
+
+  /// Unicidade: tenant + company + empresa + sku + processo
+  @@unique([tenantId, companyId, empresaId, sku])
+  @@index([tenantId, companyId, sku])
+}
+
+model Receivable {
+  id            String           @id @default(uuid())
+  tenantId      String
+  companyId     String
+  customerId    String
+  nfeId         String?
+  nfeNumbers    String?          // NF numbers acumuladas, ex: "6275, 6276, 6277"
+  billingId     String?
+  dueDate       DateTime
+  amount        Decimal          @db.Decimal(14, 2)
+  status        ReceivableStatus @default(open)
+  paymentMethod PaymentMethod?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @default(now()) @updatedAt
+  payments      Payment[]
+  billing       Billing?         @relation(fields: [billingId], references: [id])
+  company       Company          @relation(fields: [companyId], references: [id])
+  customer      Customer         @relation(fields: [customerId], references: [id])
+  nfe           Nfe?             @relation(fields: [nfeId], references: [id])
+  tenant        Tenant           @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, companyId, status])
+  @@index([customerId, dueDate])
+}
+
+model Billing {
+  id            String        @id @default(uuid())
+  billingNumber Int           @default(autoincrement())
+  tenantId      String
+  companyId     String
+  customerId    String
+  month         Int           // 1–12
+  year          Int
+  dueDate       DateTime
+  totalAmount   Decimal       @db.Decimal(14, 2)
+  status        BillingStatus @default(open)
+  paidAt        DateTime?
+  sentAt        DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @default(now()) @updatedAt
+
+  company     Company       @relation(fields: [companyId], references: [id])
+  customer    Customer      @relation(fields: [customerId], references: [id])
+  tenant      Tenant        @relation(fields: [tenantId], references: [id])
+  receivables Receivable[]
+
+  @@unique([tenantId, companyId, customerId, dueDate])
+  @@index([tenantId, companyId, status])
+}
+
+model StockLot {
+  id          String @id @default(uuid())
+  tenantId    String
+  companyId   String
+  productId   String
+  warehouseId String
+
+  // Origem
+  empresaId  String // Company dona do material
+  reference  String? // cNF ou referência manual
+  occurredAt DateTime // data da NF / entrada
+
+  // Processo do LOTE (independente do cadastro do produto)
+  processo String
+  unit     String?
+
+  // Quantidades
+  qtyInitial   Decimal @db.Decimal(18, 6)
+  qtyRemaining Decimal @db.Decimal(18, 6)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  // Relações
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  company   Company   @relation("LotEmpresaSistema", fields: [companyId], references: [id])
+  product   Product   @relation(fields: [productId], references: [id])
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id])
+
+  @@index([tenantId, companyId])
+  @@index([productId])
+  @@index([processo])
+}
+
+model StockMovement {
+  id          String         @id @default(uuid())
+  tenantId    String
+  companyId   String
+  warehouseId String
+  productId   String
+  type        StockMoveType
+  qty         Decimal        @db.Decimal(18, 6)
+  unitCost    Decimal?       @db.Decimal(18, 6)
+  ownership   StockOwnership @default(own)
+  supplierId  String?
+  customerId  String?
+  pairId      String?
+  reference   String?
+  note        String?
+  receiptImagePath String?  // E.1: foto do romaneio de entrada
+  occurredAt  DateTime       @default(now())
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @default(now()) @updatedAt
+  company     Company        @relation(fields: [companyId], references: [id])
+  customer    Customer?      @relation(fields: [customerId], references: [id])
+  product     Product        @relation(fields: [productId], references: [id])
+  supplier    Supplier?      @relation(fields: [supplierId], references: [id])
+  tenant      Tenant         @relation(fields: [tenantId], references: [id])
+  warehouse   Warehouse      @relation(fields: [warehouseId], references: [id])
+
+  @@index([tenantId, companyId, productId, warehouseId])
+  @@index([tenantId, companyId, ownership])
+  @@index([pairId])
+}
+
+model Supplier {
+  id              String          @id @default(uuid())
+  tenantId        String
+  companyId       String
+  document        String?         @unique
+  name            String
+  email           String?
+  emailFinanceiro String?
+  emailAdicional1 String?
+  emailAdicional2 String?
+  phone           String?
+  createdAt       DateTime        @default(now())
+  address         String?
+  city            String?
+  cityCode        String?
+  complement      String?
+  country         String?
+  countryCode     String?
+  crt             String?
+  district        String?
+  fantasyName     String?
+  ie              String?
+  im              String?
+  isActive        Boolean         @default(true)
+  notes           String?
+  number          String?
+  state           String?
+  updatedAt       DateTime        @default(now()) @updatedAt
+  zip             String?
+  docType         String?
+  payables        Payable[]
+  stockMovements  StockMovement[]
+  products        Product[]
+  company         Company         @relation(fields: [companyId], references: [id])
+  tenant          Tenant          @relation(fields: [tenantId], references: [id])
+  nfe Nfe[] @relation("NfeSupplier")
+
+  @@index([tenantId, companyId])
+  @@index([document])
+}
+
+model Tenant {
+  id          String          @id @default(uuid())
+  name        String
+  createdAt   DateTime        @default(now())
+  companies   Company[]
+  customers   Customer[]
+  nfe         Nfe[]
+  payables    Payable[]
+  products    Product[]
+  receivables Receivable[]
+  billings    Billing[]
+  stockMoves  StockMovement[]
+  suppliers   Supplier[]
+  warehouses  Warehouse[]
+  stockLots   StockLot[]
+  processes   Process[]
+  users       User[]
+
+  @@index([name])
+}
+
+model Transporter {
+  id        String @id @default(uuid())
+  tenantId  String
+  companyId String
+  name      String
+  cnpj      String
+  rntrc     String?
+  email     String?
+  phone     String?
+  address   String?
+  number    String?
+  district  String?
+  city      String?
+  state     String?
+  zip       String?
+  complement String?
+
+  createdAt DateTime @default(now())
+  @@index([tenantId, companyId])
+  @@index([cnpj])
+}
+
+model Warehouse {
+  id             String          @id @default(uuid())
+  tenantId       String
+  companyId      String
+  name           String
+  code           String?         @unique
+  createdAt      DateTime        @default(now())
+  company        Company         @relation(fields: [companyId], references: [id])
+  tenant         Tenant          @relation(fields: [tenantId], references: [id])
+  stockLots      StockLot[]
+  stockMovements StockMovement[]
+
+  @@index([tenantId, companyId])
+}
+
+model User {
+  id           String   @id @default(uuid())
+  tenantId     String
+  companyId    String
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         UserRole @default(MANAGER)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, companyId])
+  @@map("users")
+}
+
+
+enum DocType {
+  CPF
+  CNPJ
+}
+
+enum NfeStatus {
+  draft
+  sending
+  authorized
+  denied
+  canceled
+  error
+}
+
+enum NfeFreightPayer {
+  EMITENTE      
+  DESTINATARIO  
+  TERCEIROS
+  SEM_FRETE
+}
+
+enum NfeEventType {
+  cancel
+  cce
+  inutilization
+}
+
+enum ReceivableStatus {
+  open
+  partial
+  paid
+  canceled
+}
+
+enum BillingStatus {
+  open
+  sent
+  paid
+  overdue
+}
+
+enum PaymentMethod {
+  pix
+  card
+  billet
+  transfer
+  cash
+}
+
+enum PayableStatus {
+  open
+  partial
+  paid
+  canceled
+}
+
+enum ProductOwnerType {
+  company
+  customer
+}
+
+enum ProcessHistoryType {
+  STOCK_IN
+  STOCK_OUT
+  UNIT_CONVERSION
+  PROCESS_LINKED
+  PRICE_UPDATED
+  PROCESS_UPDATED
+  SUPPLIER_CHANGED
+  CUSTOMER_CHANGED
+  NF_EMITIDA
+  NF_CANCELADA
+  PRODUTO_ATUALIZADO
+  PRODUTO_IMPORTADO
+}
+
+enum ProcessHistoryStatus {
+  APPLIED
+  INVOICED
+  CANCELED
+  REASSIGNED
+}
+
+enum StockOwnership {
+  own
+  third_party_in
+  third_party_out
+}
+
+enum StockMoveType {
+  in
+  out
+  transfer
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+}

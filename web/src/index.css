@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Reset de scrollbar no sidebar */
+.scrollbar-none {
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+/* Garante que o app ocupa a tela toda sem scroll no body */
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}

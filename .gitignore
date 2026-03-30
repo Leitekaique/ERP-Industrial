@@ -1,0 +1,51 @@
+# ── Variáveis de ambiente (contêm senhas e segredos) ─────────────────────────
+.env
+.env.dev
+.env.prod
+.env.local
+.env.*.local
+
+# ── Certificado digital ───────────────────────────────────────────────────────
+*.pfx
+*.p12
+*.cer
+*.pem
+certs/
+
+# ── Dependências ──────────────────────────────────────────────────────────────
+node_modules/
+web/node_modules/
+
+# ── Build / compilação ────────────────────────────────────────────────────────
+dist/
+web/dist/
+*.tsbuildinfo
+tsconfig.build.tsbuildinfo
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+
+# ── Backups e uploads ─────────────────────────────────────────────────────────
+backups/
+uploads/
+*.sql.gz
+
+# ── XML e PDF gerados ─────────────────────────────────────────────────────────
+xml/
+*.xml
+*.pdf
+
+# ── Claude Code (sessões internas) ───────────────────────────────────────────
+.claude/
+
+# ── Temporários / sistema ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+*.tgz
+
+# ── Prisma (gerado automaticamente, não versionado) ───────────────────────────
+# prisma/migrations são versionados — apenas o client gerado é ignorado
+node_modules/.prisma/
