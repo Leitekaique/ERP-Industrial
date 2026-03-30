@@ -1,0 +1,3 @@
+-- AddColumn cNFCode and refNFe to Nfe
+ALTER TABLE "Nfe" ADD COLUMN IF NOT EXISTS "cNFCode" TEXT;
+ALTER TABLE "Nfe" ADD COLUMN IF NOT EXISTS "refNFe" TEXT;

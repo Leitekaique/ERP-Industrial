@@ -1,0 +1,90 @@
+export declare const api: import("axios").AxiosInstance;
+export declare const TENANT_ID = "T-001";
+export declare const COMPANY_ID = "C-001";
+export type Product = {
+    id: string;
+    tenantId: string;
+    companyId: string;
+    sku: string;
+    name: string;
+    unit?: string | null;
+    ncm?: string | null;
+    cfop?: string | null;
+    price: string;
+    taxes?: unknown | null;
+    createdAt: string;
+};
+export type Warehouse = {
+    id: string;
+    tenantId: string;
+    companyId: string;
+    name: string;
+    code: string;
+    createdAt: string;
+};
+export type BalanceRow = {
+    productId: string;
+    warehouseId: string;
+    ownership: 'own' | 'third_party_in' | 'third_party_out';
+    qty: string;
+};
+export type Supplier = {
+    id: string;
+    tenantId: string;
+    companyId: string;
+    docType: 'CNPJ' | 'CPF' | string;
+    document: string;
+    name: string;
+    email?: string | null;
+    phone?: string | null;
+    createdAt: string;
+};
+export type PayableStatus = 'open' | 'paid' | 'canceled';
+export type PaymentMethod = 'transfer' | 'pix' | 'boleto' | 'cash' | 'card' | string;
+export type Payable = {
+    id: string;
+    tenantId: string;
+    companyId: string;
+    supplierId: string;
+    nfeReceivedId?: string | null;
+    dueDate: string;
+    amount: string;
+    status: PayableStatus;
+    paymentMethod: PaymentMethod;
+    createdAt: string;
+};
+export type ReceivableStatus = 'open' | 'paid' | 'canceled';
+export type Receivable = {
+    id: string;
+    tenantId: string;
+    companyId: string;
+    customerId: string;
+    nfeId?: string | null;
+    dueDate: string;
+    amount: string;
+    status: ReceivableStatus;
+    createdAt: string;
+};
+export type Payment = {
+    id: string;
+    receivableId: string;
+    paidAt: string;
+    amount: string;
+    method?: string | null;
+    reference?: string | null;
+    note?: string | null;
+    createdAt: string;
+};
+export type Customer = {
+    id: string;
+    tenantId: string;
+    companyId: string;
+    docType: 'CNPJ' | 'CPF';
+    document: string;
+    name: string;
+    ie?: string | null;
+    email?: string | null;
+    address?: string | null;
+    zip?: string | null;
+    createdAt: string;
+};

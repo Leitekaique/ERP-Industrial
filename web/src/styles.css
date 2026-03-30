@@ -1,0 +1,5 @@
+/* estilos simples para inputs/tabelas; pode trocar por tailwind quando quiser */
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial; background: #fff; color: #111; }
+table { border-collapse: collapse; }
+th, td { border-color: #e5e7eb; }
