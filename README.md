@@ -180,4 +180,4 @@ Este repositório é público para fins de portfólio. O código não deve ser u
 
 ---
 
-*Desenvolvido por [Kaique](https://www.linkedin.com/in/seu-perfil) — 2026*
+*Desenvolvido por [Kaique](https://www.linkedin.com/in/leitekaique/) — 2026*
