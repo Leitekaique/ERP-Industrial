@@ -10,6 +10,7 @@ import { IbptService } from './ibpt.service'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as https from 'https'
+import * as forge from 'node-forge'
 import axios from 'axios'
 import * as xml2js from 'xml2js'
 import { Decimal } from '@prisma/client/runtime/library'
@@ -229,23 +230,43 @@ export class NfeEmitService {
       EMITENTE: '0', DESTINATARIO: '1', TERCEIROS: '2', SEM_FRETE: '9',
     }
 
-    // Try to detect tpAmb from sefazProtocol or xmlPath
-    const tpAmb: '1' | '2' = (nfe.sefazProtocol && !nfe.sefazProtocol.includes('SIMULADO')) ? '1' : '2'
+    // Detecta tpAmb lendo do XML salvo (mais confiável que sefazProtocol, que é null em NFs rejeitadas)
+    let tpAmb: '1' | '2' = '2'
+    if (nfe.xmlPath) {
+      try {
+        const absXml = path.resolve(nfe.xmlPath)
+        if (fs.existsSync(absXml)) {
+          const xmlRaw = fs.readFileSync(absXml, 'utf-8')
+          tpAmb = xmlRaw.includes('<tpAmb>1</tpAmb>') ? '1' : '2'
+        }
+      } catch { /* mantém '2' se falhar */ }
+    }
 
     // Build duplicatas from billingTerms if available
     const dupList: { numero: string; vencimento: string; valor: number }[] = []
     if ((receiver as any)?.billingTerms && totalInvoice > 0) {
       const terms = (receiver as any).billingTerms as string
-      const due = this.computeDueDateFromBillingTerms(new Date(nfe.issuedAt ?? nfe.createdAt), terms)
       const dupVal = (billingAmount ?? totalInvoice) + Number((nfe as any).freightValue ?? 0)
-      if (due) dupList.push({ numero: '001', vencimento: due.toLocaleDateString('pt-BR'), valor: dupVal })
+      const installments = this.parseInstallments(terms, new Date(nfe.issuedAt ?? nfe.createdAt), dupVal)
+      if (installments) {
+        installments.forEach((inst, i) => {
+          dupList.push({
+            numero: String(i + 1).padStart(3, '0'),
+            vencimento: inst.dueDate.toLocaleDateString('pt-BR'),
+            valor: inst.amount.toNumber(),
+          })
+        })
+      } else {
+        const due = this.computeDueDateFromBillingTerms(new Date(nfe.issuedAt ?? nfe.createdAt), terms)
+        dupList.push({ numero: '001', vencimento: due.toLocaleDateString('pt-BR'), valor: dupVal })
+      }
     }
 
     const data: DanfeData = {
       number: nfe.number ?? '',
       series: nfe.series ?? 1,
       chaveAcesso,
-      naturezaOperacao: nfe.naturezaOperacao ?? 'Prestação de serviço de beneficiamento',
+      naturezaOperacao: nfe.naturezaOperacao ?? 'Prestacao de servico de beneficiamento',
       issuedAt: nfe.issuedAt ?? nfe.createdAt,
       tpAmb,
       protocol: nfe.sefazProtocol ?? null,
@@ -542,9 +563,12 @@ export class NfeEmitService {
     const numeroNF = this.extractNumeroNF(xml)
 
     // ── Salva o XML assinado em disco ─────────────────────────────────────────
+    // Nome do arquivo usa a chave de acesso (44 dígitos) para que o DANFE a extraia corretamente
     const dir = path.resolve('uploads/nfe_emitidas')
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    const xmlPath = path.join(dir, `${numeroNF}.xml`)
+    const chaveMatch = signedXml.match(/Id="NFe(\d{44})"/)
+    const xmlFilename = chaveMatch ? `${chaveMatch[1]}.xml` : `${numeroNF}.xml`
+    const xmlPath = path.join(dir, xmlFilename)
     fs.writeFileSync(xmlPath, signedXml)
 
     // ── Mapeia cStat para status interno ─────────────────────────────────────
@@ -587,8 +611,26 @@ export class NfeEmitService {
       const dueDate = this.computeDueDateFromBillingTerms(issueDate, billingTerms)
 
       const isMonthly = billingTerms === 'dia15' || billingTerms === 'dia20'
+      const installments = this.parseInstallments(billingTerms, issueDate, nfeAmount.toNumber())
 
-      if (isMonthly) {
+      if (installments) {
+        // Parcelas: cria N receivables com vencimentos e valores individuais
+        for (let i = 0; i < installments.length; i++) {
+          const inst = installments[i]
+          await this.prisma.receivable.create({
+            data: {
+              tenantId, companyId,
+              customerId: nfe.customerId,
+              nfeId: updated.id,
+              nfeNumbers: String(updated.number ?? ''),
+              dueDate: inst.dueDate,
+              amount: inst.amount,
+              status: 'open' as any,
+            } as any,
+          })
+        }
+        this.logger.log(`💰 ${installments.length} parcelas criadas (${billingTerms}) — NF ${updated.number} — total ${nfeAmount}`)
+      } else if (isMonthly) {
         // Para acúmulo mensal: busca receivable aberto deste cliente no mesmo mês de vencimento
         const startOfMonth = new Date(dueDate.getFullYear(), dueDate.getMonth(), 1)
         const endOfMonth = new Date(dueDate.getFullYear(), dueDate.getMonth() + 1, 0, 23, 59, 59)
@@ -675,10 +717,13 @@ export class NfeEmitService {
     const modeLabel = sefazMode === 'simulator' ? 'simulação' : sefazMode
     this.logger.log(`✅ NF nº ${nextNfeNumber} emitida (${modeLabel}) — cStat=${response.cStat} — ${response.xMotivo}`)
 
-    // G.3 — envia DANFE + XML por e-mail (fire-and-forget, não bloqueia resposta)
-    this.sendNfeEmail(updated.id, signedXml, nextNfeNumber).catch(err =>
-      this.logger.error(`❌ Falha ao enviar e-mail da NF ${nextNfeNumber}: ${err?.message}`)
-    )
+    // G.3 — envia DANFE + XML por e-mail apenas quando autorizada em produção
+    // Não envia em homologação (evita confusão com clientes) nem em erro
+    if (autorizados.includes(response.cStat) && sefazMode === 'producao') {
+      this.sendNfeEmail(updated.id, signedXml, nextNfeNumber).catch(err =>
+        this.logger.error(`❌ Falha ao enviar e-mail da NF ${nextNfeNumber}: ${err?.message}`)
+      )
+    }
 
     return {
       message: `NF emitida com sucesso (${modeLabel})`,
@@ -701,7 +746,7 @@ export class NfeEmitService {
         include: {
           customer: { select: { name: true, email: true } },
           supplier: { select: { name: true, email: true } },
-          company: { select: { tradeName: true, legalName: true } },
+          company: { select: { tradeName: true, legalName: true, email: true, phone: true } },
         },
       }),
     ])
@@ -715,20 +760,24 @@ export class NfeEmitService {
     const recipientEmail = nfe.customer?.email ?? nfe.supplier?.email ?? null
     const toList = this.buildRecipientList(recipientEmail)
 
+    // Monta URLs de consulta SEFAZ
+    const chave = nfe.xmlPath?.match(/(\d{44})/)?.[1] ?? nfe.sefazProtocol ?? ''
+    const urlNacional = chave
+      ? `http://www.nfe.fazenda.gov.br/portal/consultaRecaptcha.aspx?tipoConsulta=completa&tipoConteudo=XbSeqxE8pl8=&nfe=${chave}`
+      : 'http://www.nfe.fazenda.gov.br/portal'
+    const urlSP = 'http://www.fazenda.sp.gov.br/nfe/'
+    const emitEmail = nfe.company?.email ?? ''
+    const emitFone = nfe.company?.phone ?? ''
+
     await this.mail.sendMail({
       to: toList,
       subject: `NF-e ${numFmt} — ${destNome} — ${emitNome}`,
-      html: `
-<div style="font-family:Arial,sans-serif;max-width:600px">
-  <h2 style="color:#333">Nota Fiscal Eletrônica Nº ${numFmt}</h2>
-  <p>Segue em anexo a NF-e emitida para <strong>${destNome}</strong>.</p>
-  <ul>
-    <li><strong>Número:</strong> ${numFmt}</li>
-    <li><strong>Emissão:</strong> ${new Date(nfe.issuedAt ?? nfe.createdAt).toLocaleDateString('pt-BR')}</li>
-    <li><strong>Valor Total:</strong> R$ ${Number(nfe.totalInvoice ?? nfe.totalProducts ?? 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</li>
-  </ul>
-  <p>Os arquivos DANFE (PDF) e XML estão em anexo.</p>
-  <p style="color:#888;font-size:12px">Gerado automaticamente pelo ERP Tapajós.</p>
+      html: `<div style="font-family:Arial,sans-serif;max-width:600px;font-size:14px;line-height:1.6">
+<p>Em anexo arquivos contendo a nota fiscal eletrônica original (xml e DANFE em pdf), juntamente com seu protocolo de autorização (xml recibo/protocolo) de uso emitido pela SEFAZ.</p>
+<p>Conforme determinação da legislação, você deve validar o DANFE correspondente a este arquivo na SEFAZ que autorizou a nf-e correspondente, ou no site da Receita Federal em:</p>
+<p><a href="${urlNacional}">${urlNacional}</a><br/><a href="${urlSP}">${urlSP}</a></p>
+<p>Atenciosamente,</p>
+<p><strong>PELETIZACAO TEXTIL TAPAJOS LTDA - ME</strong><br/>${emitEmail}${emitFone ? '<br/>' + emitFone : ''}</p>
 </div>`,
       attachments: [
         {
@@ -1642,6 +1691,24 @@ export class NfeEmitService {
   // ===========================================================
   // Helpers
   // ===========================================================
+  // Detecta formato de parcelas "15d+28d+45d" e retorna lista de { dueDate, amount } ou null.
+  private parseInstallments(billingTerms: string, issueDate: Date, totalAmount: number): { dueDate: Date; amount: Decimal }[] | null {
+    if (!billingTerms.includes('+')) return null
+    const parts = billingTerms.split('+')
+    const dayMatches = parts.map(p => p.match(/^(\d+)d$/))
+    if (dayMatches.some(m => !m)) return null
+    const days = dayMatches.map(m => parseInt(m![1], 10))
+    const n = days.length
+    const installmentAmount = new Decimal(totalAmount).dividedBy(n).toDecimalPlaces(2)
+    const sumOfFirst = installmentAmount.times(n - 1)
+    const lastAmount = new Decimal(totalAmount).minus(sumOfFirst)
+    return days.map((d, i) => {
+      const date = new Date(issueDate)
+      date.setDate(date.getDate() + d)
+      return { dueDate: date, amount: i === n - 1 ? lastAmount : installmentAmount }
+    })
+  }
+
   // Calcula o vencimento com base no billingTerms do cliente.
   // "dia15" | "dia20" → acúmulo mensal, vence dia 15 ou 20 do mês seguinte
   // "7d" | "15d" | "28d" | "45d" → N dias após emissão
@@ -1757,17 +1824,29 @@ export class NfeEmitService {
     const billingTerms = (nfe.customer as any)?.billingTerms ?? null
     let cobrSection: NfeXmlDto['cobr'] | undefined
     if (billingTerms && billingAmt > 0) {
-      const dueDate = this.computeDueDateFromBillingTerms(new Date(), billingTerms)
       const nfNumStr = String(nNF ?? '').padStart(9, '0')
       // Fatura e duplicata incluem frete do emitente (vFrete somado ao valor de cobrança)
       const billingAmtTotal = parseFloat((billingAmt + freteValor).toFixed(2))
-      cobrSection = {
-        fatura: { numero: nfNumStr, vOrig: billingAmtTotal, vLiq: billingAmtTotal },
-        duplicatas: [{
-          numero: '001',
-          dVenc: dueDate.toISOString().slice(0, 10),
-          valor: billingAmtTotal,
-        }],
+      const installments = this.parseInstallments(billingTerms, new Date(), billingAmtTotal)
+      if (installments) {
+        cobrSection = {
+          fatura: { numero: nfNumStr, vOrig: billingAmtTotal, vLiq: billingAmtTotal },
+          duplicatas: installments.map((inst, i) => ({
+            numero: String(i + 1).padStart(3, '0'),
+            dVenc: inst.dueDate.toISOString().slice(0, 10),
+            valor: inst.amount.toNumber(),
+          })),
+        }
+      } else {
+        const dueDate = this.computeDueDateFromBillingTerms(new Date(), billingTerms)
+        cobrSection = {
+          fatura: { numero: nfNumStr, vOrig: billingAmtTotal, vLiq: billingAmtTotal },
+          duplicatas: [{
+            numero: '001',
+            dVenc: dueDate.toISOString().slice(0, 10),
+            valor: billingAmtTotal,
+          }],
+        }
       }
     }
 
@@ -1775,7 +1854,7 @@ export class NfeEmitService {
       nNF,
       tpAmb,
 
-      naturezaOperacao: nfe.naturezaOperacao ?? 'Prestação de serviço de beneficiamento',
+      naturezaOperacao: nfe.naturezaOperacao ?? 'Prestacao de servico de beneficiamento',
       cnpjEmitente: String(emitente.cnpj ?? ''),
       razaoSocial: String(emitente.legalName ?? emitente.tradeName ?? ''),
       nomeFantasia: String(emitente.tradeName ?? emitente.legalName ?? ''),
@@ -1824,7 +1903,7 @@ export class NfeEmitService {
       pagamento: {
         formas: [
           { indPag: 1, tipo: '01', valor: billingAmt },
-          ...(nonBillingAmt > 0.001 ? [{ indPag: 0, tipo: '99', valor: nonBillingAmt }] : []),
+          ...(nonBillingAmt > 0.001 ? [{ tipo: '99', valor: nonBillingAmt, descricao: 'RETORNO SIMBOLICO' }] : []),
         ],
       },
 
@@ -1959,26 +2038,8 @@ export class NfeEmitService {
 
     // Envelope SOAP 1.2 para NFeAutorizacao4
     const idLote = Date.now().toString().slice(-15) // 15 dígitos
-    const soapEnvelope = `<?xml version="1.0" encoding="utf-8"?>
-<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                 xmlns:xsd="http://www.w3.org/2001/XMLSchema"
-                 xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
-  <soap12:Header>
-    <nfeCabecMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4">
-      <cUF>${process.env.SEFAZ_UF ?? '35'}</cUF>
-      <versaoDados>4.00</versaoDados>
-    </nfeCabecMsg>
-  </soap12:Header>
-  <soap12:Body>
-    <nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4">
-      <enviNFe versao="4.00" xmlns="http://www.portalfiscal.inf.br/nfe">
-        <idLote>${idLote}</idLote>
-        <indSinc>1</indSinc>
-        ${nfeElement}
-      </enviNFe>
-    </nfeDadosMsg>
-  </soap12:Body>
-</soap12:Envelope>`
+    // Envelope SOAP compacto — SEFAZ rejeita whitespace entre tags (cStat=588)
+    const soapEnvelope = `<?xml version="1.0" encoding="utf-8"?><soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope"><soap12:Header><nfeCabecMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4"><cUF>${process.env.SEFAZ_UF ?? '35'}</cUF><versaoDados>4.00</versaoDados></nfeCabecMsg></soap12:Header><soap12:Body><nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4"><enviNFe versao="4.00" xmlns="http://www.portalfiscal.inf.br/nfe"><idLote>${idLote}</idLote><indSinc>1</indSinc>${nfeElement}</enviNFe></nfeDadosMsg></soap12:Body></soap12:Envelope>`
 
     // Endpoint SEFAZ-SP (homologação ou produção)
     const endpoints: Record<string, string> = {
@@ -1988,11 +2049,18 @@ export class NfeEmitService {
     const url = endpoints[mode]
 
     // HTTPS agent com o certificado A1 para autenticação mútua TLS
+    // Usa node-forge para extrair key/cert como PEM (evita incompatibilidade RC2 do OpenSSL 3.x)
+    const pfxDer = certBuffer!.toString('binary')
+    const p12Asn1 = forge.asn1.fromDer(pfxDer)
+    const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, certPassword)
+    const keyBags = p12.getBags({ bagType: (forge.pki.oids as any).pkcs8ShroudedKeyBag })[(forge.pki.oids as any).pkcs8ShroudedKeyBag] ?? []
+    const certBags = p12.getBags({ bagType: (forge.pki.oids as any).certBag })[(forge.pki.oids as any).certBag] ?? []
+    const privateKeyPem = forge.pki.privateKeyToPem(keyBags[0].key!)
+    const certPem = forge.pki.certificateToPem(certBags[0].cert!)
     const httpsAgent = new https.Agent({
-      pfx: certBuffer!,
-      passphrase: certPassword,
-      // Em produção valida o certificado SEFAZ (ICP-Brasil); homologação aceita cert auto-assinado
-      rejectUnauthorized: mode === 'producao',
+      key: privateKeyPem,
+      cert: certPem,
+      rejectUnauthorized: false, // ICP-Brasil CA não está no bundle padrão do Node.js
     })
 
     try {
@@ -2031,12 +2099,20 @@ export class NfeEmitService {
                        ?? (Object.values(body ?? {}) as any[])[0]?.['retEnviNFe']
                        ?? {}
 
-      const cStat: string  = nfeDadosRet?.cStat   ?? nfeDadosRet?.['ns1:cStat']   ?? 'ERRO'
-      const xMotivo: string = nfeDadosRet?.xMotivo ?? nfeDadosRet?.['ns1:xMotivo'] ?? 'Resposta não reconhecida'
+      // cStat do lote (ex: 104 = lote processado); cStat da NF individual fica no infProt
+      const cStatLote: string = nfeDadosRet?.cStat ?? nfeDadosRet?.['ns1:cStat'] ?? 'ERRO'
 
-      // Protocolo de autorização (só existe quando cStat 100/150)
+      // Protocolo de autorização — está dentro de protNFe.infProt quando autorizado
       const infProt = nfeDadosRet?.protNFe?.infProt ?? nfeDadosRet?.['ns1:protNFe']?.['ns1:infProt']
       const nProt: string | null = infProt?.nProt ?? null
+
+      // Se o lote foi processado (104) usa o cStat individual do infProt; caso contrário usa o do lote
+      const cStat: string = (cStatLote === '104' && infProt?.cStat)
+        ? String(infProt.cStat)
+        : cStatLote
+      const xMotivo: string = (cStatLote === '104' && infProt?.xMotivo)
+        ? String(infProt.xMotivo)
+        : (nfeDadosRet?.xMotivo ?? nfeDadosRet?.['ns1:xMotivo'] ?? 'Resposta não reconhecida')
 
       this.logger.log(`📡 SEFAZ resposta: cStat=${cStat} — ${xMotivo}`)
       return { cStat, xMotivo, nProt }

@@ -49,3 +49,23 @@ Thumbs.db
 # ── Prisma (gerado automaticamente, não versionado) ───────────────────────────
 # prisma/migrations são versionados — apenas o client gerado é ignorado
 node_modules/.prisma/
+
+# ── Scripts temporários de debug / patch ──────────────────────────────────────
+patch-*.js
+
+# ── Arquivos de deploy e produção (contêm caminhos/senhas do servidor) ────────
+copiar-deploy.ps1
+docker-compose.prod.yml
+erp-api.tar
+scripts/1_preparar_deploy.ps1
+scripts/2_instalar_cliente.ps1
+scripts/agendar-backup.ps1
+scripts/backup-diario.ps1
+scripts/backup-semanal-gdrive.ps1
+
+# ── SQL operacional (dados reais da empresa) ──────────────────────────────────
+deploy-db.sql
+limpar-nfe-hoje.sql
+
+# ── Logs de ferramentas externas ──────────────────────────────────────────────
+*robocopy-log.txt

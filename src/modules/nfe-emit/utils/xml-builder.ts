@@ -130,6 +130,11 @@ export interface NfeXmlDto {
 
 // ─── Builder ──────────────────────────────────────────────────────────────────
 
+// Remove acentos e caracteres especiais — evita encoding duplo no XML SEFAZ
+function stripAccents(s: string): string {
+  return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+}
+
 export function buildXml(dto: NfeXmlDto): string {
   const now = new Date()
 
@@ -138,8 +143,8 @@ export function buildXml(dto: NfeXmlDto): string {
 
   const chave = buildChaveAcesso({ cnpj: dto.cnpjEmitente, nNF, dataEmissao: now, cNFCode: dto.cNFCode })
 
-  // ISO 8601 com timezone Brasil (-03:00)
-  const dhEmi = now.toISOString().replace('Z', '-03:00')
+  // ISO 8601 com timezone Brasil (-03:00), sem milissegundos (schema NF-e 4.00)
+  const dhEmi = new Date(now.getTime() - 10800000).toISOString().replace(/\.\d{3}Z$/, '-03:00')
   // Data de saída = mesma data de emissão (padrão para serviços)
   const dhSaiEnt = dhEmi
 
@@ -151,7 +156,7 @@ export function buildXml(dto: NfeXmlDto): string {
   const ide = root.ele('ide')
   ide.ele('cUF').txt('35')
   ide.ele('cNF').txt(chave.slice(35, 43))
-  ide.ele('natOp').txt(dto.naturezaOperacao)
+  ide.ele('natOp').txt(stripAccents(dto.naturezaOperacao))
   ide.ele('mod').txt('55')
   ide.ele('serie').txt('1')
   ide.ele('nNF').txt(String(nNF))
@@ -169,7 +174,7 @@ export function buildXml(dto: NfeXmlDto): string {
   ide.ele('finNFe').txt('1')
   ide.ele('indFinal').txt('0')
   ide.ele('indPres').txt('9')
-  ide.ele('indIntermed').txt(dto.indIntermed ?? '0')
+  ide.ele('indIntermed').txt('0')
   ide.ele('procEmi').txt('0')
   ide.ele('verProc').txt('TapajosERP-1.0')
   // NFref: referência(s) à NF de entrada (para CFOP 5902 — retorno de industrialização)
@@ -184,8 +189,8 @@ export function buildXml(dto: NfeXmlDto): string {
   // ── EMITENTE ───────────────────────────────────────────────────────────────
   const emit = root.ele('emit')
   emit.ele('CNPJ').txt(dto.cnpjEmitente.replace(/\D/g, ''))
-  emit.ele('xNome').txt(dto.razaoSocial)
-  if (dto.nomeFantasia) emit.ele('xFant').txt(dto.nomeFantasia)
+  emit.ele('xNome').txt(stripAccents(dto.razaoSocial))
+  if (dto.nomeFantasia) emit.ele('xFant').txt(stripAccents(dto.nomeFantasia))
   const enderEmit = emit.ele('enderEmit')
   enderEmit.ele('xLgr').txt(dto.endereco)
   if (dto.numero) enderEmit.ele('nro').txt(dto.numero)
@@ -209,7 +214,7 @@ export function buildXml(dto: NfeXmlDto): string {
   } else {
     dest.ele('CPF').txt(docDest)
   }
-  dest.ele('xNome').txt(dto.cliente.nome)
+  dest.ele('xNome').txt(tpAmb === '2' ? 'NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL' : dto.cliente.nome)
   const enderDest = dest.ele('enderDest')
   enderDest.ele('xLgr').txt(dto.cliente.endereco || 'N/D')
   if (dto.cliente.numero) enderDest.ele('nro').txt(dto.cliente.numero)
@@ -222,8 +227,8 @@ export function buildXml(dto: NfeXmlDto): string {
   enderDest.ele('cPais').txt('1058')
   enderDest.ele('xPais').txt('BRASIL')
   if (dto.cliente.telefone) enderDest.ele('fone').txt(dto.cliente.telefone)
-  if (dto.cliente.ie) dest.ele('IE').txt(dto.cliente.ie)
   dest.ele('indIEDest').txt(dto.cliente.ie ? '1' : '9')
+  if (dto.cliente.ie) dest.ele('IE').txt(dto.cliente.ie)
   if (dto.cliente.email) dest.ele('email').txt(dto.cliente.email)
 
   // ── ITENS (det) ────────────────────────────────────────────────────────────
@@ -249,6 +254,11 @@ export function buildXml(dto: NfeXmlDto): string {
     prod.ele('indTot').txt('1')
 
     const imposto = det.ele('imposto')
+
+    // Tributos aproximados IBPT por item — vTotTrib deve ser o PRIMEIRO filho de <imposto>
+    if (item.vTotTrib !== undefined) {
+      imposto.ele('vTotTrib').txt(item.vTotTrib.toFixed(2))
+    }
 
     // ICMS — Simples Nacional usa CSOSN
     const csosn = item.impostos?.icms?.csosn || '400'
@@ -279,10 +289,6 @@ export function buildXml(dto: NfeXmlDto): string {
     // COFINS — idem
     imposto.ele('COFINS').ele('COFINSNT').ele('CST').txt(item.impostos?.cofins?.cst || '08')
 
-    // Tributos aproximados IBPT por item (obrigatório desde 2013)
-    if (item.vTotTrib !== undefined) {
-      imposto.ele('vTotTrib').txt(item.vTotTrib.toFixed(2))
-    }
   })
 
   // ── TOTAIS ─────────────────────────────────────────────────────────────────
@@ -327,7 +333,7 @@ export function buildXml(dto: NfeXmlDto): string {
   }
   const vol = transp.ele('vol')
   vol.ele('qVol').txt(String(dto.transporte?.qVol ?? 0))
-  vol.ele('esp').txt(dto.transporte?.esp || '')
+  if (dto.transporte?.esp) vol.ele('esp').txt(dto.transporte.esp)
   if (dto.transporte?.marca) vol.ele('marca').txt(dto.transporte.marca)
   vol.ele('pesoL').txt((dto.transporte?.pesoL ?? 0).toFixed(3))
   vol.ele('pesoB').txt((dto.transporte?.pesoB ?? 0).toFixed(3))
@@ -359,6 +365,8 @@ export function buildXml(dto: NfeXmlDto): string {
     const detPag = pag.ele('detPag')
     if (f.indPag !== undefined) detPag.ele('indPag').txt(String(f.indPag))
     detPag.ele('tPag').txt(f.tipo)
+    // xPag obrigatório quando tPag=99 — deve vir ANTES de vPag no schema NF-e 4.00
+    if (f.tipo === '99') detPag.ele('xPag').txt(f.descricao ?? 'Outros')
     detPag.ele('vPag').txt(f.valor.toFixed(2))
   })
 
