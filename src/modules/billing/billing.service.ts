@@ -248,30 +248,18 @@ export class BillingService {
     // Gera PDF
     const pdfBuffer = await buildBillingPdf(this.toBillingPdfData(billing))
 
-    const html = `
-<div style="font-family:Arial,sans-serif;max-width:600px">
-  <h2 style="color:#333">Fatura ${billing.billingNumber} — ${mesLabel}</h2>
-  <p>Olá, segue em anexo a duplicata referente ao faturamento de <strong>${mesLabel}</strong>.</p>
-  <table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%">
-    <thead><tr style="background:#f0f0f0">
-      <th>Data</th><th>NF Nº</th><th>Valor</th>
-    </tr></thead>
-    <tbody>
-      ${(this.toBillingPdfData(billing).nfs).map(nf =>
-        `<tr><td>${nf.data}</td><td>${nf.numero}</td><td>R$ ${Number(nf.valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</td></tr>`
-      ).join('')}
-    </tbody>
-    <tfoot><tr style="font-weight:bold;background:#f9f9f9">
-      <td colspan="2">Total</td><td>${total}</td>
-    </tr></tfoot>
-  </table>
-  <br/><p>Em caso de dúvidas, entre em contato com o setor financeiro.</p>
-  <p style="color:#888;font-size:12px">Gerado automaticamente pelo ERP Tapajós.</p>
+    const html = `<div style="font-family:Arial,sans-serif;max-width:600px;font-size:14px;line-height:1.6">
+<p>Boa tarde prezado(a)</p>
+<p>Envio anexo a fatura ${billing.billingNumber}.</p>
+<p>Os dados bancários para efetuação do pagamento encontram-se no cabeçalho da fatura.</p>
+<p>Dessa maneira, solicito que assinem, datem e reenviem a fatura neste endereço de e-mail, confirmando a conferência e recebimento da mesma.</p>
+<p>Atenciosamente.</p>
+<p><strong>Peletização Tapajós</strong></p>
 </div>`
 
     await this.mail.sendMail({
       to: toList,
-      subject: `Duplicata ${billing.billingNumber} — ${customer.name} — ${total}`,
+      subject: `Fatura ${billing.billingNumber} — ${customer.name}`,
       html,
       attachments: [{
         filename: `duplicata-${billing.billingNumber}.pdf`,
@@ -308,15 +296,15 @@ export class BillingService {
       include: { customer: { select: { name: true } } },
     })
 
-    const dataPagamento = new Date().toLocaleDateString('pt-BR')
     if (OFFICE_EMAIL) this.mail.sendMail({
       to: OFFICE_EMAIL,
       subject: `Fatura paga — ${billing.customer?.name ?? billing.customerId} — Fatura Nº ${billing.billingNumber}`,
-      html: `<p>Pagamento registrado em <strong>${dataPagamento}</strong>.</p>
-             <p>Cliente: <strong>${billing.customer?.name ?? billing.customerId}</strong></p>
-             <p>Fatura Nº: <strong>${billing.billingNumber}</strong></p>
-             <p>Período: ${['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'][billing.month - 1]}/${billing.year}</p>
-             <p>Total: <strong>R$ ${Number(billing.totalAmount).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</strong></p>`,
+      html: `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6">
+<p>Olá,</p>
+<p>A fatura ${billing.billingNumber} foi paga.</p>
+<p>Grato!</p>
+<p><strong>Tapajós</strong></p>
+</div>`,
     }).catch(() => {})
 
     return billing

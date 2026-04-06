@@ -346,8 +346,8 @@ export async function buildDanfePdf(d: DanfeData): Promise<Buffer> {
     // HEADER — emitente | DANFE | chave
     // Layout: nome no topo → logo centralizado → endereço embaixo
     // ══════════════════════════════════════════════════════════════════════════
-    const emitW = CW * 0.40
-    const danfeW = CW * 0.22
+    const emitW = CW * 0.42
+    const danfeW = CW * 0.18
     const chaveW = CW - emitW - danfeW
 
     const fmtCep = (s?: string) => s ? s.replace(/(\d{5})(\d{3})/, '$1-$2') : ''
@@ -367,7 +367,7 @@ export async function buildDanfePdf(d: DanfeData): Promise<Buffer> {
     const logoAreaW = emitW - 12
 
     // 1. Nome completo no topo
-    doc.fontSize(8).font('Helvetica-Bold').fillColor('#000')
+    doc.fontSize(10).font('Helvetica-Bold').fillColor('#000')
       .text(d.emitNome, ML + 3, y + 3, { width: emitW - 6, align: 'center', lineBreak: false })
 
     // 2. Logo centralizado na área do meio
@@ -409,27 +409,33 @@ export async function buildDanfePdf(d: DanfeData): Promise<Buffer> {
       .text(`SÉRIE ${serie}   FOLHA 1/${totalPages}`, dx, y + 75, { width: danfeW, align: 'center' })
 
     // ── Chave de acesso block (direita) ───────────────────────────────────────
+    // Layout (topo→base): 3 boxes dividindo hdrH igualmente
+    //   [box 1] barcode — sem título
+    //   [box 2] "CHAVE DE ACESSO" + números formatados
+    //   [box 3] texto consulta — espaço restante
     const chaveX = ML + emitW + danfeW
-    const fiscoH = Math.round(hdrH * 0.36)  // ~32pt para CONTROLE DO FISCO
-    const chaveH = hdrH - fiscoH
+    const barcodeBoxH = Math.round(hdrH / 3)
+    const chaveNumH = Math.round(hdrH / 3)
+    const consultaH = hdrH - barcodeBoxH - chaveNumH
 
-    // Controle do Fisco (topo direito — espaço para carimbo da SEFAZ)
-    drawBox(doc, chaveX, y, chaveW, fiscoH)
-    doc.fontSize(5.5).font('Helvetica').fillColor('#000')
-      .text('CONTROLE DO FISCO', chaveX + 3, y + 2, { width: chaveW - 6, lineBreak: false })
-
-    // Chave de acesso (baixo direito)
-    drawBox(doc, chaveX, y + fiscoH, chaveW, chaveH)
-    doc.fontSize(5.5).font('Helvetica').fillColor('#000')
-      .text('CHAVE DE ACESSO', chaveX + 3, y + fiscoH + 2, { width: chaveW - 6, lineBreak: false })
+    // Box 1: barcode sem título
+    drawBox(doc, chaveX, y, chaveW, barcodeBoxH)
     if (barcodeBuffer) {
-      doc.image(barcodeBuffer, chaveX + 3, y + fiscoH + 9, { width: chaveW - 6, height: 14 })
+      doc.image(barcodeBuffer, chaveX + 3, y + 2, { width: chaveW - 6, height: barcodeBoxH - 4 })
     }
+
+    // Box 2: título "CHAVE DE ACESSO" + números
+    drawBox(doc, chaveX, y + barcodeBoxH, chaveW, chaveNumH)
+    doc.fontSize(5.5).font('Helvetica').fillColor('#000')
+      .text('CHAVE DE ACESSO', chaveX + 3, y + barcodeBoxH + 2, { width: chaveW - 6, lineBreak: false })
     doc.fontSize(7).font('Helvetica-Bold').fillColor('#000')
-      .text(chaveFormatted(d.chaveAcesso), chaveX + 3, y + fiscoH + 25, { width: chaveW - 6, align: 'center' })
+      .text(chaveFormatted(d.chaveAcesso), chaveX + 3, y + barcodeBoxH + 9, { width: chaveW - 6, align: 'center' })
+
+    // Box 3: consulta — ocupa espaço restante
+    drawBox(doc, chaveX, y + barcodeBoxH + chaveNumH, chaveW, consultaH)
     doc.fontSize(5.5).font('Helvetica').fillColor('#000')
       .text('Consulta de autenticidade no portal nacional da NF-e\nwww.nfe.fazenda.gov.br/portal ou no site da Sefaz autorizadora',
-        chaveX + 3, y + fiscoH + 34, { width: chaveW - 6, align: 'center' })
+        chaveX + 3, y + barcodeBoxH + chaveNumH + 2, { width: chaveW - 6, align: 'center' })
 
     y += hdrH
 
@@ -709,7 +715,7 @@ export async function buildDanfePdf(d: DanfeData): Promise<Buffer> {
       const addrH2 = 30
       const logoAreaH2 = hdrH - nameH2 - addrH2
       const logoAreaW2 = emitW - 12
-      doc.fontSize(8).font('Helvetica-Bold').fillColor('#000')
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#000')
         .text(d.emitNome, ML + 3, cy + 3, { width: emitW - 6, align: 'center', lineBreak: false })
       if (logoPath) {
         try { doc.image(logoPath, ML + 6, cy + nameH2, { fit: [logoAreaW2, logoAreaH2], align: 'center', valign: 'center' }) } catch { /* skip */ }
@@ -742,23 +748,27 @@ export async function buildDanfePdf(d: DanfeData): Promise<Buffer> {
         .text(`SÉRIE ${serie}   FOLHA ${pageNum}/${totalPages}`, dx2, cy + 75, { width: danfeW, align: 'center' })
 
       // ── Chave de acesso block ─────────────────────────────────────────────────
+      // Mesmo layout da página 1: 3 boxes dividindo hdrH igualmente
       const chaveX2 = ML + emitW + danfeW
-      const fiscoH2 = Math.round(hdrH * 0.36)
-      const chaveH2 = hdrH - fiscoH2
-      drawBox(doc, chaveX2, cy, chaveW, fiscoH2)
-      doc.fontSize(5.5).font('Helvetica').fillColor('#000')
-        .text('CONTROLE DO FISCO', chaveX2 + 3, cy + 2, { width: chaveW - 6, lineBreak: false })
-      drawBox(doc, chaveX2, cy + fiscoH2, chaveW, chaveH2)
-      doc.fontSize(5.5).font('Helvetica').fillColor('#000')
-        .text('CHAVE DE ACESSO', chaveX2 + 3, cy + fiscoH2 + 2, { width: chaveW - 6, lineBreak: false })
+      const barcodeBoxH2 = Math.round(hdrH / 3)
+      const chaveNumH2 = Math.round(hdrH / 3)
+      const consultaH2 = hdrH - barcodeBoxH2 - chaveNumH2
+      // Box 1: barcode
+      drawBox(doc, chaveX2, cy, chaveW, barcodeBoxH2)
       if (barcodeBuffer) {
-        doc.image(barcodeBuffer, chaveX2 + 3, cy + fiscoH2 + 9, { width: chaveW - 6, height: 14 })
+        doc.image(barcodeBuffer, chaveX2 + 3, cy + 2, { width: chaveW - 6, height: barcodeBoxH2 - 4 })
       }
+      // Box 2: CHAVE DE ACESSO
+      drawBox(doc, chaveX2, cy + barcodeBoxH2, chaveW, chaveNumH2)
+      doc.fontSize(5.5).font('Helvetica').fillColor('#000')
+        .text('CHAVE DE ACESSO', chaveX2 + 3, cy + barcodeBoxH2 + 2, { width: chaveW - 6, lineBreak: false })
       doc.fontSize(7).font('Helvetica-Bold').fillColor('#000')
-        .text(chaveFormatted(d.chaveAcesso), chaveX2 + 3, cy + fiscoH2 + 25, { width: chaveW - 6, align: 'center' })
+        .text(chaveFormatted(d.chaveAcesso), chaveX2 + 3, cy + barcodeBoxH2 + 9, { width: chaveW - 6, align: 'center' })
+      // Box 3: consulta
+      drawBox(doc, chaveX2, cy + barcodeBoxH2 + chaveNumH2, chaveW, consultaH2)
       doc.fontSize(5.5).font('Helvetica').fillColor('#000')
         .text('Consulta de autenticidade no portal nacional da NF-e\nwww.nfe.fazenda.gov.br/portal ou no site da Sefaz autorizadora',
-          chaveX2 + 3, cy + fiscoH2 + 34, { width: chaveW - 6, align: 'center' })
+          chaveX2 + 3, cy + barcodeBoxH2 + chaveNumH2 + 2, { width: chaveW - 6, align: 'center' })
       cy += hdrH
 
       // ── NatOp + Protocolo ─────────────────────────────────────────────────────
@@ -830,6 +840,20 @@ export async function buildDanfePdf(d: DanfeData): Promise<Buffer> {
             `Gerado por Tapajós ERP   |   FOLHA ${pageNum}/${totalPages}   |   ${new Date().toLocaleString('pt-BR')}`,
             ML, PH - 12, { width: CW, align: 'center', lineBreak: false }
           )
+      }
+    }
+
+    // ── Marca d'água HOMOLOGAÇÃO em todas as páginas ────────────────────────
+    if (homolog) {
+      const range = doc.bufferedPageRange()
+      for (let i = 0; i < range.count; i++) {
+        doc.switchToPage(range.start + i)
+        doc.save()
+        doc.opacity(0.07)
+        doc.fontSize(72).font('Helvetica-Bold').fillColor('#FF0000')
+        doc.rotate(-45, { origin: [PW / 2, PH / 2] })
+        doc.text('HOMOLOGAÇÃO', 0, PH / 2 - 36, { width: PW, align: 'center', lineBreak: false })
+        doc.restore()
       }
     }
 

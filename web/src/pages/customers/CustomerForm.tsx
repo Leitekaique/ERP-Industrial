@@ -236,10 +236,15 @@ if (editing && !customer) {
           <option value="15d">Vencimento em 15 dias após emissão</option>
           <option value="28d">Vencimento em 28 dias após emissão</option>
           <option value="45d">Vencimento em 45 dias após emissão</option>
+          <option value="15d+28d+45d">3 parcelas: d+15 / d+28 / d+45</option>
+          <option value="30d+60d">2 parcelas: d+30 / d+60</option>
+          <option value="30d+60d+90d">3 parcelas: d+30 / d+60 / d+90</option>
         </select>
         <p className="text-xs text-gray-400 mt-1">
           {form.billingTerms === 'dia15' || form.billingTerms === 'dia20'
             ? 'Todas as NFs do mês são consolidadas em uma única duplicata emitida no último dia do mês.'
+            : form.billingTerms?.includes('+')
+            ? 'Valor da NF dividido em parcelas iguais — cria um recebível e uma duplicata por parcela.'
             : 'Uma duplicata por NF emitida, vencendo conforme o prazo selecionado.'}
         </p>
       </FormField>

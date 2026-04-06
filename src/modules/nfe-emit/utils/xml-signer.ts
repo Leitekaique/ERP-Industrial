@@ -37,8 +37,8 @@ export function signXml(xml: string, certBuffer: Buffer, password: string): stri
   try {
     // 1. Parseia o PKCS#12 com node-forge para extrair chave e certificado
     const pfxDer = certBuffer.toString('binary')
-    const p12Asn1 = forge.asn1.fromDer(pfxDer, false)
-    const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, password)
+    const p12Asn1 = forge.asn1.fromDer(pfxDer)
+    const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, password)
 
     const keyBags = p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[forge.pki.oids.pkcs8ShroudedKeyBag] ?? []
     const certBags = p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] ?? []
@@ -59,11 +59,9 @@ export function signXml(xml: string, certBuffer: Buffer, password: string): stri
     const certBase64 = forge.util.encode64(certDer)
 
     // 4. Configura o SignedXml com RSA-SHA1
-    const sig = new SignedXml({
-      privateKey: privateKeyPem,
-      // KeyInfo personalizado: inclui o X509Certificate do certificado A1
-      publicCert: `<X509Data><X509Certificate>${certBase64}</X509Certificate></X509Data>`,
-    } as any)
+    const sig = new SignedXml({ privateKey: privateKeyPem } as any)
+    // getKeyInfo vazio — KeyInfo é injetado manualmente após assinatura (garante estrutura correta)
+    ;(sig as any).getKeyInfo = () => ''
 
     // Referência ao elemento infNFe com as transforms exigidas pelo SEFAZ:
     //   - enveloped-signature: remove o próprio elemento Signature do digest
@@ -89,8 +87,19 @@ export function signXml(xml: string, certBuffer: Buffer, password: string): stri
       prefix: '', // sem prefixo: <Signature xmlns="..."> em vez de <ds:Signature>
     })
 
+    // Injeta KeyInfo com X509Certificate — xml-crypto gera <KeyInfo><X509Data/></KeyInfo> vazio,
+    // então substituímos sempre pelo bloco completo com o certificado
+    const signedXml = sig.getSignedXml()
+    const keyInfoBlock = `<KeyInfo xmlns="http://www.w3.org/2000/09/xmldsig#"><X509Data><X509Certificate>${certBase64}</X509Certificate></X509Data></KeyInfo>`
+    let result: string
+    if (signedXml.includes('<KeyInfo')) {
+      // Substitui o KeyInfo vazio gerado pelo xml-crypto pelo nosso com o certificado
+      result = signedXml.replace(/<KeyInfo[\s\S]*?<\/KeyInfo>/, keyInfoBlock)
+    } else {
+      result = signedXml.replace('</SignatureValue>', `</SignatureValue>${keyInfoBlock}`)
+    }
     console.log(`✅ NF-e assinada digitalmente (${mode})`)
-    return sig.getSignedXml()
+    return result
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     throw new Error(`Falha ao assinar XML: ${msg}`)
