@@ -32,6 +32,29 @@ export class BaseMoveDto {
   @IsOptional()
   @IsString()
   note?: string
+
+  // Referência livre (romaneio, pedido…)
+  @IsOptional()
+  @IsString()
+  reference?: string
+
+  // Data do movimento informada na tela (antes era ignorada: gravava "agora")
+  @IsOptional()
+  occurredAt?: string | Date
+
+  // Unidade da quantidade informada (filtra os lotes nessa unidade)
+  @IsOptional()
+  @IsString()
+  unit?: string
+
+  // Lote específico (ação feita a partir da linha do lote na tela de estoque)
+  @IsOptional()
+  @IsString()
+  lotId?: string
+
+  @IsOptional()
+  @IsString()
+  receiptImagePath?: string
 }
 
 export class StockInDto extends BaseMoveDto {
@@ -49,6 +72,11 @@ export class StockOutDto extends BaseMoveDto {
   @IsOptional()
   @IsString()
   empresaId?: string
+
+  // Nome usado pela tela de movimento para o mesmo filtro de dono
+  @IsOptional()
+  @IsString()
+  empresaOrigemId?: string
 
   // Quando true: cria Receivable com preço × quantidade respeitando billingTerms do cliente
   @IsOptional()

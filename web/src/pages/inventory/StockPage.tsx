@@ -428,6 +428,9 @@ export default function StockPage() {
                                 state: {
                                   unit: row.unit,
                                   empresaOrigemId: row.empresaId,
+                                  warehouseId: row.warehouseId,
+                                  lotId: row.id,
+                                  lotLabel: `${row.reference ? 'NF ' + row.reference + ' — ' : ''}${row.onHand} ${row.unit ?? ''}`.trim(),
                                   fromList: true,
                                 },
                               })

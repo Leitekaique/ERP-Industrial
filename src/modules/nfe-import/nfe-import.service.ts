@@ -14,6 +14,7 @@ import {
 } from '../../common/constants/tenant-company.constants'
 import { ProcessHistoryService } from '../process-history/process-history.service'
 import { ProcessHistoryType } from '@prisma/client'
+import { criarLote } from '../inventory/stock-lots'
 
 
 const UPLOAD_DIR = path.resolve('./uploads')
@@ -86,50 +87,56 @@ export class NfeImportService {
         emit,
         dest,
       })
-	  const nfImport = await this.prisma.nfeImport.create({
-        data: {
-          tenantId,
-          companyId,
-          accessKey,
-          emitente: emit?.xNome,
-          destinatario: dest?.xNome,
-          valorTotal: Number(infNFe.total?.ICMSTot?.vNF ?? 0),
-          dataEmissao,
-          xmlPath: file.path,
-		  nfNumber,
-		  serie,
-		  modelo,
-        },
-      })
-
-      for (const det of itens) {
-        await this.handleProductImport({
-          tenantId,
-          companyId,
-          tipoNf,
-          item: det.prod,
-          supplier,
-          customer,
-          dataEmissao,
-          reference: ide?.cNF ?? accessKey,
-		  nfEntrada,        // o que vai pra coluna NF entrada
-		  nfImportId: nfImport.id,   // se você quiser amarrar depois em FK
-		  accessKey,
+      // Tudo da NF (registro, produtos, lotes, movimentos, contas a pagar) numa
+      // transação: se um item falhar, nada fica gravado pela metade.
+      await this.prisma.$transaction(async (db) => {
+        const nfImport = await db.nfeImport.create({
+          data: {
+            tenantId,
+            companyId,
+            accessKey,
+            emitente: emit?.xNome,
+            destinatario: dest?.xNome,
+            valorTotal: Number(infNFe.total?.ICMSTot?.vNF ?? 0),
+            dataEmissao,
+            xmlPath: file.path,
+            nfNumber,
+            serie,
+            modelo,
+          },
         })
-      }
 
-      // ── Auto-cria Contas a Pagar para NF de consumo e compra de insumos ──────
-      if ((tipoNf === 'CONSUMO' || tipoNf === 'COMPRA_INSUMO') && supplier) {
-        await this.createPayablesFromNf({
-          tenantId,
-          companyId,
-          supplierId: supplier.id,
-          nfeImportId: nfImport.id,
-          infNFe,
-          valorTotal: Number(infNFe.total?.ICMSTot?.vNF ?? 0),
-          dataEmissao,
-        })
-      }
+        for (const det of itens) {
+          await this.handleProductImport({
+            db,
+            tenantId,
+            companyId,
+            tipoNf,
+            item: det.prod,
+            supplier,
+            customer,
+            dataEmissao,
+            reference: ide?.cNF ?? accessKey,
+            nfEntrada,               // o que vai pra coluna NF entrada
+            nfImportId: nfImport.id, // liga o lote à NF importada
+            accessKey,
+          })
+        }
+
+        // ── Auto-cria Contas a Pagar para NF de consumo e compra de insumos ──────
+        if ((tipoNf === 'CONSUMO' || tipoNf === 'COMPRA_INSUMO') && supplier) {
+          await this.createPayablesFromNf({
+            db,
+            tenantId,
+            companyId,
+            supplierId: supplier.id,
+            nfeImportId: nfImport.id,
+            infNFe,
+            valorTotal: Number(infNFe.total?.ICMSTot?.vNF ?? 0),
+            dataEmissao,
+          })
+        }
+      }, { timeout: 120_000 })
 
       return { message: 'NF importada com sucesso.' }
     } catch (err: any) {
@@ -297,6 +304,7 @@ private classifyNfe({
   // 📦 PRODUTOS
   // ===========================================================
   private async handleProductImport({
+  db,
   tenantId,
   companyId,
   tipoNf,
@@ -306,6 +314,7 @@ private classifyNfe({
   dataEmissao,
   reference,
   nfEntrada,
+  nfImportId,
   accessKey,
 }: any) {
 
@@ -357,7 +366,7 @@ const importMeta = {
  */
 if (tipoNf === 'COMPRA_INSUMO') {
   // INSUMO (unique: tenantId, companyId, sku, empresaId=supplier.id)
-  produtoBase = await this.upsertProductWithImportRules({
+  produtoBase = await this.upsertProductWithImportRules({ db,
     tenantId,
     companyId,
     empresaId: supplier.id,
@@ -408,7 +417,7 @@ if (tipoNf === 'COMPRA_INSUMO') {
   const cfopFisico = tipoNf === 'TRIANGULACAO' ? '5925' : '5902'
 
   // unique: tenantId, companyId, sku, empresaId=empresaIdProduto (customer no seu contrato)
-  produtoBase = await this.upsertProductWithImportRules({
+  produtoBase = await this.upsertProductWithImportRules({ db,
     tenantId,
     companyId,
     empresaId: empresaIdProduto,
@@ -462,7 +471,7 @@ if (tipoNf === 'REMESSA_IND' || tipoNf === 'TRIANGULACAO') {
   // CFOP de MO: 5125 em triangulação, 5124 em remessa normal
   const cfopMo = tipoNf === 'TRIANGULACAO' ? '5125' : '5124'
 
-  await this.upsertProductWithImportRules({
+  await this.upsertProductWithImportRules({ db,
     tenantId,
     companyId,
     empresaId: companyId, // MO sempre Tapajós (company)
@@ -506,7 +515,7 @@ if (tipoNf === 'REMESSA_IND' || tipoNf === 'TRIANGULACAO') {
    * 5️⃣ ESTOQUE (COMPRA DE INSUMO / REMESSA / TRIANGULAÇÃO)
    * ===========================================================
    */
-const warehouse = await this.prisma.warehouse.findFirst({
+const warehouse = await db.warehouse.findFirst({
   where: { tenantId, companyId },
 })
 
@@ -515,45 +524,36 @@ if (!warehouse) {
   return
 }
 
-// 🔹 StockLot
-const lot = await this.prisma.stockLot.create({
-  data: {
-    tenantId,
-    companyId,
-    productId: produtoBase.id,
-    warehouseId: warehouse.id,
-    empresaId: empresaIdProduto,
-    processo: (tipoNf === 'REMESSA_IND' || tipoNf === 'TRIANGULACAO') ? 'Industrializacao' : 'Insumo',
-    qtyInitial: Number(item.qCom),
-    qtyRemaining: Number(item.qCom),
-    reference: nfEntrada ?? reference,
-    occurredAt: dataEmissao,
-    // se você tiver unit no lot/model, pode setar aqui:
-    // unit: item.uCom ?? null,
-  },
-})
-
-// 🔹 StockMovement (GUARDA O RETORNO)
-const movement = await this.prisma.stockMovement.create({
-  data: {
-    tenantId,
-    companyId,
-    warehouseId: warehouse.id,
-    productId: produtoBase.id,
-    type: 'in',
-    qty: Number(item.qCom),
-    unitCost: Number(item.vUnCom), // (você já corrigiu o ?? 0)
-    ownership: tipoNf === 'COMPRA_INSUMO' ? 'own' : 'third_party_in',
+// 🔹 Lote + movimento de entrada (regras únicas de stock-lots.ts)
+// Dono (empresaId): cliente na remessa/triangulação, fornecedor no insumo
+// comprado (vira Tapajós quando o usuário converte a unidade), Tapajós no resto.
+const { lot, movementId } = await criarLote(db, {
+  tenantId,
+  companyId,
+  productId: produtoBase.id,
+  warehouseId: warehouse.id,
+  empresaId: empresaIdProduto,
+  processo: (tipoNf === 'REMESSA_IND' || tipoNf === 'TRIANGULACAO') ? 'Industrializacao' : 'Insumo',
+  // unidade da própria NF — o cadastro do produto pode estar em outra unidade
+  unit: item.uCom?.trim() || produtoBase.unit || null,
+  quantity: Number(item.qCom),
+  casas: 4,
+  reference: nfEntrada ?? reference,
+  occurredAt: dataEmissao,
+  nfeImportId: nfImportId ?? null,
+  movimento: {
     note: `Entrada via NF ${nfEntrada ?? reference}`,
+    unitCost: Number(item.vUnCom ?? 0),
     supplierId: supplier?.id ?? null,
     customerId: customer?.id ?? null,
   },
 })
+const movement = { id: movementId }
 
 // 🔹 ProcessHistory (AGORA COM VARIÁVEIS QUE EXISTEM)
 // depois de criar lot e movement...
 
-await this.processHistoryService.record({
+await this.recordHist(db, {
   tenantId,
   companyId,
   empresaId: companyId,
@@ -630,39 +630,37 @@ await this.processHistoryService.record({
     }
 
     const lots = await this.prisma.stockLot.findMany({
-      where: { reference: { in: [...allRefs] } },
-      select: { reference: true, qtyInitial: true, qtyRemaining: true },
+      where: {
+        OR: [
+          { nfeImportId: { in: nfes.map(n => n.id) } },
+          { nfeImportId: null, reference: { in: [...allRefs] } },
+        ],
+      },
+      select: { nfeImportId: true, reference: true, occurredAt: true, tenantId: true, companyId: true, qtyInitial: true, qtyRemaining: true },
     })
-
-    const lotsByRef = new Map<string, { qtyInitial: any; qtyRemaining: any }[]>()
-    for (const lot of lots) {
-      if (!lot.reference) continue
-      const existing = lotsByRef.get(lot.reference) ?? []
-      existing.push(lot)
-      lotsByRef.set(lot.reference, existing)
-    }
 
     return nfes.map(nf => {
-      const refs = [
-        nf.serie && nf.nfNumber ? `${nf.serie}-${nf.nfNumber}` : null,
-        nf.nfNumber,
-        nf.accessKey,
-      ].filter(Boolean) as string[]
-
-      let hasStockMoved = false
-      for (const ref of refs) {
-        const refLots = lotsByRef.get(ref) ?? []
-        for (const lot of refLots) {
-          if (Number(lot.qtyRemaining) < Number(lot.qtyInitial)) {
-            hasStockMoved = true
-            break
-          }
-        }
-        if (hasStockMoved) break
-      }
-
+      const hasStockMoved = lots
+        .filter(l => this.loteEhDaNf(l, nf))
+        .some(l => Number(l.qtyRemaining) < Number(l.qtyInitial))
       return { ...nf, canDelete: !hasStockMoved }
     })
+  }
+
+  /**
+   * O lote pertence a esta NF importada? Pela ligação nfeImportId; para lotes
+   * antigos (sem a ligação), mesma NF E mesma data de emissão — só o número
+   * não basta (dois fornecedores podem ter a NF 1-173802).
+   */
+  private loteEhDaNf(
+    lot: { nfeImportId: string | null; reference: string | null; occurredAt: Date; tenantId: string; companyId: string },
+    nf: { id: string; serie: string | null; nfNumber: string | null; accessKey: string; dataEmissao: Date; tenantId: string; companyId: string },
+  ): boolean {
+    if (lot.nfeImportId) return lot.nfeImportId === nf.id
+    const refs = [nf.serie && nf.nfNumber ? `${nf.serie}-${nf.nfNumber}` : null, nf.nfNumber, nf.accessKey].filter(Boolean)
+    return !!lot.reference && refs.includes(lot.reference) &&
+      lot.tenantId === nf.tenantId && lot.companyId === nf.companyId &&
+      lot.occurredAt.getTime() === nf.dataEmissao.getTime()
   }
 
   // ===========================================================
@@ -678,10 +676,13 @@ await this.processHistoryService.record({
       nfImport.accessKey,
     ].filter(Boolean) as string[]
 
-    const lots = await this.prisma.stockLot.findMany({
-      where: { reference: { in: refs } },
-      select: { id: true, qtyInitial: true, qtyRemaining: true, productId: true, warehouseId: true },
+    const candidatos = await this.prisma.stockLot.findMany({
+      where: { OR: [{ nfeImportId: id }, { nfeImportId: null, reference: { in: refs } }] },
+      select: { id: true, nfeImportId: true, reference: true, occurredAt: true, tenantId: true, companyId: true, qtyInitial: true, qtyRemaining: true, productId: true },
     })
+    // Só os lotes desta NF (antes: qualquer lote com o mesmo número de NF,
+    // inclusive de outro fornecedor)
+    const lots = candidatos.filter(l => this.loteEhDaNf(l, nfImport))
 
     const movedLot = lots.find(l => Number(l.qtyRemaining) < Number(l.qtyInitial))
     if (movedLot) {
@@ -690,29 +691,33 @@ await this.processHistoryService.record({
       )
     }
 
-    // Apaga movimentos de entrada vinculados a esta NF
-    const notePrefixes = refs.map(r => `Entrada via NF ${r}`)
-    await this.prisma.stockMovement.deleteMany({
-      where: {
-        note: { in: notePrefixes },
-        type: 'in' as any,
-      },
+    await this.prisma.$transaction(async (tx) => {
+      const lotIds = lots.map(l => l.id)
+      if (lotIds.length > 0) {
+        // Movimentos de entrada desta NF: pelo lotId, e os antigos sem lotId
+        // pela nota "Entrada via NF …" restrita aos produtos destes lotes
+        await tx.stockMovement.deleteMany({
+          where: {
+            type: 'in' as any,
+            OR: [
+              { lotId: { in: lotIds } },
+              {
+                lotId: null,
+                note: { in: refs.map(r => `Entrada via NF ${r}`) },
+                productId: { in: [...new Set(lots.map(l => l.productId))] },
+              },
+            ],
+          },
+        })
+        await tx.stockLot.deleteMany({ where: { id: { in: lotIds } } })
+      }
+
+      // Contas a pagar vinculadas
+      await tx.payable.deleteMany({ where: { nfeReceivedId: id } as any })
+
+      // Registro da NF importada
+      await tx.nfeImport.delete({ where: { id } })
     })
-
-    // Apaga os lotes de estoque
-    if (lots.length > 0) {
-      await this.prisma.stockLot.deleteMany({
-        where: { id: { in: lots.map(l => l.id) } },
-      })
-    }
-
-    // Apaga contas a pagar vinculadas
-    await this.prisma.payable.deleteMany({
-      where: { nfeReceivedId: id } as any,
-    })
-
-    // Apaga o registro da NF importada
-    await this.prisma.nfeImport.delete({ where: { id } })
 
     this.logger.log(`🗑️ NF importada excluída: ${nfImport.nfNumber ?? nfImport.accessKey} (${id})`)
     return { message: 'NF importada excluída com sucesso.' }
@@ -721,6 +726,7 @@ await this.processHistoryService.record({
 // Requer: import { ProcessHistoryType } from '@prisma/client'
 
 private async upsertProductWithImportRules(params: {
+  db?: any // cliente da transação da importação
   tenantId: string
   companyId: string
   empresaId: string
@@ -745,8 +751,9 @@ private async upsertProductWithImportRules(params: {
     protectFields,
     importMeta,
   } = params
+  const db = params.db ?? this.prisma
 
-  const existing = await this.prisma.product.findUnique({
+  const existing = await db.product.findUnique({
     where: {
       tenantId_companyId_empresaId_sku: {
         tenantId,
@@ -761,9 +768,9 @@ private async upsertProductWithImportRules(params: {
   // 1) NÃO EXISTE → CRIA (e registra PRODUTO_IMPORTADO)
   // ===========================================================
   if (!existing) {
-    const created = await this.prisma.product.create({ data: createData })
+    const created = await db.product.create({ data: createData })
 
-    await this.processHistoryService.record({
+    await this.recordHist(db, {
       tenantId,
       companyId,
       empresaId: companyId, // ✅ FK segura (Company)
@@ -819,7 +826,7 @@ private async upsertProductWithImportRules(params: {
 
   if (!Object.keys(diff).length) return existing
 
-  const updated = await this.prisma.product.update({
+  const updated = await db.product.update({
     where: { id: existing.id },
     data: diff,
   })
@@ -827,7 +834,7 @@ private async upsertProductWithImportRules(params: {
   // ===========================================================
   // 4) HISTÓRICO: PRODUTO_ATUALIZADO (somente quando houve mudança)
   // ===========================================================
-  await this.processHistoryService.record({
+  await this.recordHist(db, {
     tenantId,
     companyId,
     empresaId: companyId, // ✅ FK segura (Company)
@@ -864,6 +871,7 @@ private async upsertProductWithImportRules(params: {
 // 💸 CONTAS A PAGAR — geradas a partir de <dup> do XML
 // ===========================================================
 private async createPayablesFromNf({
+  db = this.prisma,
   tenantId,
   companyId,
   supplierId,
@@ -872,6 +880,7 @@ private async createPayablesFromNf({
   valorTotal,
   dataEmissao,
 }: {
+  db?: any // cliente da transação da importação
   tenantId: string
   companyId: string
   supplierId: string
@@ -897,7 +906,7 @@ private async createPayablesFromNf({
       const amount = Number(dup.vDup ?? 0)
       if (amount <= 0) continue
 
-      await this.prisma.payable.create({
+      await db.payable.create({
         data: {
           tenantId,
           companyId,
@@ -915,7 +924,7 @@ private async createPayablesFromNf({
   } else {
     // Sem <dup>: cria um único registro com vencimento +30 dias
     const dueDate = new Date(dataEmissao.getTime() + 30 * 24 * 60 * 60 * 1000)
-    await this.prisma.payable.create({
+    await db.payable.create({
       data: {
         tenantId,
         companyId,
@@ -930,5 +939,10 @@ private async createPayablesFromNf({
       `💸 Conta a pagar criada (sem <dup>, venc. +30d) — NF import ${nfeImportId}`,
     )
   }
+}
+
+// Histórico de processos gravado na mesma transação da importação
+private recordHist(db: any, params: Parameters<ProcessHistoryService['record']>[0]) {
+  return this.processHistoryService.record(params, db)
 }
 }

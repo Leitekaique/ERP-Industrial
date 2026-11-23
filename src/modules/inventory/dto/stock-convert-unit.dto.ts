@@ -35,5 +35,18 @@ export class StockConvertUnitDto {
   @IsString()
   empresaOrigemId?: string
 
+  // Lote específico (botão "Converter" na linha do lote)
+  @IsOptional()
+  @IsString()
+  lotId?: string
+
+  // Unidade dos lotes de origem (evita converter lotes de outra unidade)
+  @IsOptional()
+  @IsString()
+  unitOrigem?: string
+
+  // Sem decorator o ValidationPipe (whitelist) descartava a observação
+  @IsOptional()
+  @IsString()
   note?: string
 }

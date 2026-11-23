@@ -34,6 +34,12 @@ export default function StockMoveForm() {
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
 
+  // Quando vem do botão "Movimentar" de uma linha do estoque, a saída é feita
+  // exatamente daquele lote (antes o sistema escolhia o lote mais antigo do
+  // produto, mesmo que fosse de outra unidade ou de outro dono)
+  const lotId: string | undefined = location.state?.lotId
+  const lotLabel: string | undefined = location.state?.lotLabel
+
   const localISO = () => {
     const now = new Date()
     return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
@@ -43,6 +49,7 @@ export default function StockMoveForm() {
   useEffect(() => {
     if (location.state?.unit) setUnit(location.state.unit)
     if (location.state?.empresaOrigemId) setEmpresaOrigemId(location.state.empresaOrigemId)
+    if (location.state?.warehouseId) setWarehouseId(location.state.warehouseId)
   }, [location.state])
 
   useEffect(() => {
@@ -103,6 +110,7 @@ export default function StockMoveForm() {
         note,
         ...(receiptImagePath ? { receiptImagePath } : {}),
         ...(type === 'out' ? { generateCharge } : {}),
+        ...(type === 'out' && lotId ? { lotId } : {}),
       })
 
       nav('/inventory/stock')
@@ -153,6 +161,11 @@ export default function StockMoveForm() {
           <option value="out">Saída</option>
           <option value="in">Entrada</option>
         </select>
+        {type === 'out' && lotId && (
+          <p className="text-xs text-slate-500 mt-1">
+            Saída do lote selecionado{lotLabel ? ` (${lotLabel})` : ''}.
+          </p>
+        )}
       </FormField>
 
       <FormField label="Depósito">

@@ -102,6 +102,34 @@ export default function BillingList() {
     }
   }
 
+  // Retira do A Receber / faturas as NFs canceladas que ficaram lá (dados antigos).
+  // 1º simula e mostra o que mudaria; só grava se o usuário confirmar.
+  const [verificando, setVerificando] = useState(false)
+  async function verificarCanceladas() {
+    const tenantId = String(import.meta.env.VITE_TENANT_ID ?? 'T-001')
+    const companyId = String(import.meta.env.VITE_COMPANY_ID ?? 'C-001')
+    const brl = (v: number) => v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+    const resumo = (r: any) => [
+      `NFs canceladas encontradas no A Receber: ${r.nfsCorrigidas.join(', ')}`,
+      `Recebíveis a cancelar: ${r.recebiveisCancelados} · a ajustar: ${r.recebiveisAjustados}`,
+      ...r.faturasRecalculadas.map((f: any) => `Fatura ${f.numero}: ${brl(f.totalAnterior)} → ${brl(f.totalNovo)}`),
+      ...(r.avisos.length ? ['', 'Atenção:', ...r.avisos] : []),
+    ].join('\n')
+    setVerificando(true)
+    try {
+      const { data: sim } = await api.post('/billing/reconciliar-canceladas', { tenantId, companyId, simular: true })
+      if (!sim.nfsCorrigidas.length) { alert('Nenhuma NF cancelada encontrada no A Receber ou em faturas. Está tudo certo.'); return }
+      if (!confirm(`${resumo(sim)}\n\nAplicar estas correções?`)) return
+      await api.post('/billing/reconciliar-canceladas', { tenantId, companyId, simular: false })
+      alert('Correções aplicadas. Faturas já enviadas ao cliente precisam ser reenviadas.')
+      refetch()
+    } catch (e: any) {
+      alert(`Erro: ${e?.response?.data?.message ?? e?.message ?? 'sem conexão'}`)
+    } finally {
+      setVerificando(false)
+    }
+  }
+
   const list = data ?? []
 
   const sortedList = useMemo(() => {
@@ -130,6 +158,14 @@ export default function BillingList() {
     <div className="space-y-4">
       <PageHeader title="Faturamento" sub="Faturas mensais por cliente">
         <button className="px-3 py-2 border rounded text-sm bg-white" onClick={() => nav('/financeiro/historico')}>Histórico Geral</button>
+        <button
+          className="px-3 py-2 border rounded text-sm bg-white disabled:opacity-50"
+          onClick={verificarCanceladas}
+          disabled={verificando}
+          title="Retira do A Receber e das faturas o valor de NFs que foram canceladas"
+        >
+          {verificando ? 'Verificando…' : 'Verificar NFs canceladas'}
+        </button>
         <button
           className="px-3 py-2 bg-tapajos-600 text-white rounded text-sm"
           onClick={() => setShowGenerate(!showGenerate)}

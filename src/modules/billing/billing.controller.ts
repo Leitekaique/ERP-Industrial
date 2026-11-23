@@ -24,6 +24,18 @@ export class BillingController {
     })
   }
 
+  // POST /billing/reconciliar-canceladas
+  // Body: { tenantId, companyId, simular?: boolean }
+  // Retira do A Receber / faturas as NFs canceladas que ficaram lá (dados antigos)
+  @Post('reconciliar-canceladas')
+  reconciliarCanceladas(
+    @Body() body: { tenantId: string; companyId: string; simular?: boolean },
+  ) {
+    return this.service.reconciliarCanceladas({
+      tenantId: body.tenantId, companyId: body.companyId, simular: body.simular !== false,
+    })
+  }
+
   // POST /billing/generate
   // Body: { customerId, month, year }
   @Post('generate')

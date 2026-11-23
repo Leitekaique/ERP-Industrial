@@ -3,6 +3,7 @@ import { PrismaService } from '../../database/prisma.service'
 import { CreateReceivableDto } from './dto/create-receivable.dto'
 import { CreatePaymentDto } from './dto/create-payment.dto'
 import { Decimal } from '@prisma/client/runtime/library'
+import { recalcularTotalFatura } from '../billing/billing-sync'
 
 @Injectable()
 export class ReceivablesService {
@@ -32,8 +33,13 @@ export class ReceivablesService {
     })
   }
 
+  // Cancela o recebível e, se ele estiver numa fatura, recalcula o total dela
   cancel(id: string) {
-    return this.prisma.receivable.update({ where: { id }, data: { status: 'canceled' as any } })
+    return this.prisma.$transaction(async (tx) => {
+      const rec = await tx.receivable.update({ where: { id }, data: { status: 'canceled' as any } })
+      if (rec.billingId) await recalcularTotalFatura(tx, rec.billingId)
+      return rec
+    })
   }
 
   create(dto: CreateReceivableDto) {

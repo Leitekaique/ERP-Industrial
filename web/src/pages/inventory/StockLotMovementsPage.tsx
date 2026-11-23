@@ -54,6 +54,7 @@ export default function StockLotMovementsPage() {
             Saldo atual: <span className="font-medium text-slate-700">{lot.qtyRemaining} {lot.unit}</span>
           </div>
           {lot.reference && <div className="text-slate-400 text-xs">Ref.: {lot.reference}</div>}
+          {lot.nfEntrada && <div className="text-slate-400 text-xs">NF de entrada: {lot.nfEntrada}</div>}
           <div className="text-slate-400 text-xs">Entrada em: {new Date(lot.occurredAt).toLocaleDateString('pt-BR')}</div>
         </div>
       )}
@@ -71,7 +72,7 @@ export default function StockLotMovementsPage() {
               </span>
               <span className="font-semibold text-slate-800">
                 {m.type?.startsWith('out') || m.type === 'transfer_out' || m.type === 'convert_out' ? '-' : '+'}
-                {m.qty} {lot?.unit}
+                {m.qty} {m.unit ?? lot?.unit}
               </span>
               <span className="ml-auto text-slate-400 text-xs">
                 {new Date(m.occurredAt).toLocaleDateString('pt-BR')}

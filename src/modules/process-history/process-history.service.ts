@@ -32,8 +32,8 @@ export class ProcessHistoryService {
 	nfEntrada?: string
     nfEntradaId?: string | null
     nfSaidaId?: string | null
-  }) {
-    return this.prisma.processHistory.create({
+  }, db: any = this.prisma) { // db: permite gravar dentro da transação de quem chama
+    return db.processHistory.create({
       data: {
         tenantId: params.tenantId,
         companyId: params.companyId,

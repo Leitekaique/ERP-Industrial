@@ -5,6 +5,7 @@ import { SearchableSelect } from './ui/SearchableSelect'
 
 type ConvertUnitModalProps = {
   data: {
+    id?: string // id do lote (linha do estoque)
     tenantId: string
     companyId: string
     productId: string
@@ -80,6 +81,9 @@ export function ConvertUnitModal({ data, onClose, onSuccess }: ConvertUnitModalP
           : `Conv. ${data.unit}→${unitDestino} (fator ${fator})`,
         empresaDestinoId,
         ...(data.empresaId ? { empresaOrigemId: data.empresaId } : {}),
+        // converte exatamente o lote da linha clicada (e só na unidade dele)
+        ...(data.id ? { lotId: data.id } : {}),
+        unitOrigem: data.unit,
       })
       onSuccess?.()
       onClose()

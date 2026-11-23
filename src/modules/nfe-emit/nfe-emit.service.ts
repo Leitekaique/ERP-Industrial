@@ -5,6 +5,12 @@ import { buildDanfePdf, DanfeData } from './utils/danfe-html'
 import { signXml, getSefazEnv } from './utils/xml-signer'
 import { buildCancelEventXml, buildCceEventXml, signEventXml } from './utils/event-xml-builder'
 import { buildCancelPdf, buildCcePdf } from './utils/event-pdf'
+import {
+  buildNfeProc, buildProcEventoNFe, extractElement, extractAllElements,
+  isNfeProc, isProcEvento, protocolMatchesNfe, tagValue,
+} from './utils/nfe-proc'
+import { removerNfDosRecebiveis } from '../billing/billing-sync'
+import { ehLoteDeCliente, estornarSaida } from '../inventory/stock-lots'
 import { MailService } from '../mail/mail.service'
 import { IbptService } from './ibpt.service'
 import * as fs from 'fs'
@@ -652,11 +658,16 @@ export class NfeEmitService {
     const chaveMatch = signedXml.match(/Id="NFe(\d{44})"/)
     const xmlFilename = chaveMatch ? `${chaveMatch[1]}.xml` : `${numeroNF}.xml`
     const xmlPath = path.join(dir, xmlFilename)
-    fs.writeFileSync(xmlPath, signedXml)
 
     // ── Mapeia cStat para status interno ─────────────────────────────────────
     // 100 e 150 = autorizado, 204 = duplicidade (tratar como autorizado)
     const autorizados = ['100', '150', '204']
+
+    // XML de distribuição (nfeProc = NFe + protocolo SEFAZ) quando autorizada.
+    // 204 (duplicidade) não traz o protocolo original → fica só a NFe assinada,
+    // e o protocolo pode ser recuperado depois por "Regerar XML" (consulta SEFAZ).
+    const distribuicaoXml = this.montarNfeProcSeValido(signedXml, response, numeroNF)
+    fs.writeFileSync(xmlPath, distribuicaoXml)
     const nextStatus = autorizados.includes(response.cStat)
       ? NfeStatus.authorized
       : response.cStat === 'SIMULADO'
@@ -698,7 +709,6 @@ export class NfeEmitService {
         this.logger.log(`ℹ️ NF ${updated.number} sem itens faturáveis (CFOPs não cobráveis) — a receber não gerado`)
       } else {
 
-      const isMonthly = billingTerms === 'dia15' || billingTerms === 'dia20'
       const installments = this.parseInstallments(billingTerms, issueDate, nfeAmount.toNumber())
 
       if (installments) {
@@ -718,47 +728,12 @@ export class NfeEmitService {
           })
         }
         this.logger.log(`💰 ${installments.length} parcelas criadas (${billingTerms}) — NF ${updated.number} — total ${nfeAmount}`)
-      } else if (isMonthly) {
-        // Para acúmulo mensal: busca receivable aberto deste cliente no mesmo mês de vencimento
-        const startOfMonth = new Date(dueDate.getFullYear(), dueDate.getMonth(), 1)
-        const endOfMonth = new Date(dueDate.getFullYear(), dueDate.getMonth() + 1, 0, 23, 59, 59)
-        // Só acumula em receivable que ainda NÃO foi incluído em fatura (billingId: null)
-        const existing = await this.prisma.receivable.findFirst({
-          where: {
-            tenantId, companyId, customerId: nfe.customerId,
-            status: 'open' as any,
-            billingId: null,
-            dueDate: { gte: startOfMonth, lte: endOfMonth },
-          },
-        })
-        const nfNumStr = String(updated.number ?? '')
-        if (existing) {
-          const newAmount = new Decimal(existing.amount).add(nfeAmount)
-          const prevNums = (existing as any).nfeNumbers ?? ''
-          const alreadyHas = prevNums.split(',').map((s: string) => s.trim()).includes(nfNumStr)
-          const newNfeNumbers = alreadyHas ? prevNums : (prevNums ? `${prevNums}, ${nfNumStr}` : nfNumStr)
-          await this.prisma.receivable.update({
-            where: { id: existing.id },
-            data: { amount: newAmount, nfeNumbers: newNfeNumbers } as any,
-          })
-          this.logger.log(`💰 Receivable acumulado (${billingTerms}) — cliente ${nfe.customerId} — NFs: ${newNfeNumbers} — total ${newAmount}`)
-        } else {
-          // Nenhum receivable em aberto sem fatura para este mês: cria um novo
-          await this.prisma.receivable.create({
-            data: {
-              tenantId, companyId,
-              customerId: nfe.customerId,
-              nfeId: updated.id,
-              nfeNumbers: nfNumStr,
-              dueDate,
-              amount: nfeAmount,
-              status: 'open' as any,
-            } as any,
-          })
-          this.logger.log(`💰 Receivable mensal criado (${billingTerms}) — vencimento ${dueDate.toISOString().slice(0, 10)}`)
-        }
       } else {
-        // Para termos por NF: cria um receivable por emissão
+        // Um recebível por NF — inclusive clientes mensais (dia15/dia20).
+        // O agrupamento do mês é feito pela fatura (BillingService.generateBilling),
+        // que soma os recebíveis do cliente com o mesmo vencimento. Assim, cancelar
+        // uma NF é só cancelar o recebível dela (antes as NFs eram somadas num
+        // recebível só e o valor da cancelada ficava na fatura).
         await this.prisma.receivable.create({
           data: {
             tenantId, companyId,
@@ -810,7 +785,7 @@ export class NfeEmitService {
     // G.3 — envia DANFE + XML por e-mail apenas quando autorizada em produção
     // Não envia em homologação (evita confusão com clientes) nem em erro
     if (autorizados.includes(response.cStat) && sefazMode === 'producao') {
-      this.sendNfeEmail(updated.id, signedXml, nextNfeNumber).catch(err =>
+      this.sendNfeEmail(updated.id, distribuicaoXml, nextNfeNumber).catch(err =>
         this.logger.error(`❌ Falha ao enviar e-mail da NF ${nextNfeNumber}: ${err?.message}`)
       )
     }
@@ -824,6 +799,33 @@ export class NfeEmitService {
       xMotivo: response.xMotivo,
       nProt: response.nProt,
       sefazMode,
+    }
+  }
+
+  // ── Monta o nfeProc (NFe + protNFe) quando a SEFAZ autorizou ───────────────
+  // Se algo não bater (sem protocolo, chave ou assinatura diferente), devolve a
+  // NFe assinada sem envelope — nunca grava um nfeProc inconsistente.
+  private montarNfeProcSeValido(
+    signedXml: string,
+    response: { cStat: string; protNFeXml: string | null },
+    numeroNF: string | number,
+  ): string {
+    if (!['100', '150'].includes(response.cStat) || !response.protNFeXml) {
+      if (response.cStat === '204') {
+        this.logger.warn(`⚠️ NF ${numeroNF}: duplicidade (204) — XML salvo sem protocolo; use "Regerar XML"`)
+      }
+      return signedXml
+    }
+    const check = protocolMatchesNfe(signedXml, response.protNFeXml)
+    if (!check.ok) {
+      this.logger.error(`❌ NF ${numeroNF}: protocolo não confere (${check.motivo}) — XML salvo sem protocolo`)
+      return signedXml
+    }
+    try {
+      return buildNfeProc(signedXml, response.protNFeXml)
+    } catch (e: any) {
+      this.logger.error(`❌ NF ${numeroNF}: falha ao montar nfeProc (${e?.message}) — XML salvo sem protocolo`)
+      return signedXml
     }
   }
 
@@ -1099,33 +1101,9 @@ export class NfeEmitService {
     })
 
     await this.prisma.$transaction(async (tx) => {
+      // Devolve a cada lote exatamente o que esta NF tirou (pelo lotId do movimento)
       for (const mov of outMovements) {
-        // Extrai o lotId do campo note: "Baixa por criação de NF (draft) - lote {lotId}"
-        const lotId = mov.note?.split('lote ')?.[1]?.trim()
-        if (lotId) {
-          await tx.stockLot.update({
-            where: { id: lotId },
-            data: { qtyRemaining: { increment: mov.qty as any } },
-          })
-        }
-
-        // Registra movimento de entrada como estorno
-        await tx.stockMovement.create({
-          data: {
-            tenantId: mov.tenantId,
-            companyId: mov.companyId,
-            warehouseId: mov.warehouseId,
-            productId: mov.productId,
-            type: 'in' as any,
-            qty: mov.qty,
-            ownership: mov.ownership,
-            customerId: mov.customerId,
-            supplierId: mov.supplierId,
-            occurredAt: new Date(),
-            reference: `ESTORNO_DRAFT:${id}`,
-            note: `Estorno por exclusão de NF draft - lote ${lotId ?? 'desconhecido'}`,
-          },
-        })
+        await estornarSaida(tx, mov, { reference: `ESTORNO_DRAFT:${id}`, note: 'Estorno por exclusão de NF draft' })
       }
 
       // Remove ProcessHistory vinculado ao draft antes de deletar o Nfe
@@ -1211,6 +1189,7 @@ export class NfeEmitService {
       if (CANCEL_OK.has(sefazResp.cStat)) {
         sefazStatus = 'authorized'
         sefazProtocol = sefazResp.nProt ?? sefazResp.xMotivo
+        this.gravarProcEvento(xmlFilePath, signedXml, sefazResp.retEventoXml, `cancelamento NF ${nfe.number}`)
       } else {
         // SEFAZ rejeitou — registra o evento como erro, NF permanece autorizada no BD
         await this.prisma.nfeEvent.create({
@@ -1249,8 +1228,20 @@ export class NfeEmitService {
       },
     })
 
-    await this.prisma.nfe.update({ where: { id }, data: { status: 'canceled' } })
+    // Status da NF + retirada do A Receber/fatura na mesma transação
+    const financeiro = await this.prisma.$transaction(async (tx) => {
+      const nfeCancelada = await tx.nfe.update({
+        where: { id },
+        data: { status: 'canceled' },
+        include: { items: { select: { cfop: true, total: true } } },
+      })
+      return removerNfDosRecebiveis(tx, nfeCancelada as any)
+    })
     this.logger.log(`NF-e ${nfe.number} cancelada — SEFAZ cStat=${sefazStatus} (evento ${evento.id})`)
+    if (financeiro.recebiveisCancelados || financeiro.recebiveisAjustados) {
+      this.logger.log(`💰 NF ${nfe.number}: ${financeiro.recebiveisCancelados} recebível(is) cancelado(s), ${financeiro.recebiveisAjustados} ajustado(s), ${financeiro.faturasRecalculadas.length} fatura(s) recalculada(s)`)
+    }
+    for (const aviso of financeiro.avisos) this.logger.warn(`⚠️ ${aviso}`)
 
     // Devolve itens ao estoque (mesmo padrão do deleteDraft)
     const outMovements = await this.prisma.stockMovement.findMany({
@@ -1259,29 +1250,7 @@ export class NfeEmitService {
     if (outMovements.length > 0) {
       await this.prisma.$transaction(async (tx) => {
         for (const mov of outMovements) {
-          const lotId = mov.note?.split('lote ')?.[1]?.trim()
-          if (lotId) {
-            await tx.stockLot.update({
-              where: { id: lotId },
-              data: { qtyRemaining: { increment: mov.qty as any } },
-            })
-          }
-          await tx.stockMovement.create({
-            data: {
-              tenantId: mov.tenantId,
-              companyId: mov.companyId,
-              warehouseId: mov.warehouseId,
-              productId: mov.productId,
-              type: 'in' as any,
-              qty: mov.qty,
-              ownership: mov.ownership,
-              customerId: mov.customerId,
-              supplierId: mov.supplierId,
-              occurredAt: new Date(),
-              reference: `ESTORNO_CANCEL:${id}`,
-              note: `Estorno por cancelamento de NF - lote ${lotId ?? 'desconhecido'}`,
-            },
-          })
+          await estornarSaida(tx, mov, { reference: `ESTORNO_CANCEL:${id}`, note: 'Estorno por cancelamento de NF' })
         }
         await tx.processHistory.deleteMany({ where: { nfSaidaId: id } })
       })
@@ -1297,6 +1266,7 @@ export class NfeEmitService {
       eventoId: evento.id,
       ambiente: tpAmb === '1' ? 'Produção' : 'Homologação',
       status: sefazStatus,
+      financeiro,
     }
   }
 
@@ -1366,6 +1336,7 @@ export class NfeEmitService {
       if (CCE_OK.has(sefazResp.cStat)) {
         sefazStatus = 'authorized'
         sefazProtocol = sefazResp.nProt ?? sefazResp.xMotivo
+        this.gravarProcEvento(xmlFilePath, signedXml, sefazResp.retEventoXml, `CC-e ${nSeqEvento} NF ${nfe.number}`)
       } else {
         await this.prisma.nfeEvent.create({
           data: {
@@ -1845,9 +1816,10 @@ export class NfeEmitService {
       const productIds = [...new Set(lots.map(l => l.productId))]
       const products = await tx.product.findMany({
         where: { id: { in: productIds } },
-        select: { id: true, processo: true },
+        select: { id: true, processo: true, unit: true },
       })
       const productById = new Map(products.map(p => [p.id, p]))
+      const productUnitById = new Map(products.map(p => [p.id, p.unit]))
 
       if (lots.length !== lotIds.length) {
         const found = new Set(lots.map(l => l.id))
@@ -1872,6 +1844,8 @@ export class NfeEmitService {
           data: { qtyRemaining: { decrement: c.qty as any } },
         })
 
+        // Lote de cliente = material de terceiro saindo (devolução/beneficiado)
+        const loteDeCliente = await ehLoteDeCliente(tx, lot.empresaId)
         const movement = await tx.stockMovement.create({
           data: {
             tenantId,
@@ -1880,7 +1854,9 @@ export class NfeEmitService {
             productId: lot.productId,
             type: 'out',
             qty: c.qty as any,
-            ownership: 'own',
+            lotId: lot.id,
+            unit: lot.unit ?? productUnitById.get(lot.productId) ?? null,
+            ownership: loteDeCliente ? 'third_party_out' : 'own',
             occurredAt: new Date(),
             reference: `NF_DRAFT:${nfe.id}`,
             note: `Baixa por criação de NF (draft) - lote ${lot.id}`,
@@ -2297,18 +2273,226 @@ export class NfeEmitService {
   }
 
   // ===========================================================
+  // XML de distribuição de eventos (procEventoNFe)
+  // ===========================================================
+  private gravarProcEvento(xmlFilePath: string, signedXml: string, retEventoXml: string | null, label: string) {
+    if (!retEventoXml) {
+      this.logger.warn(`⚠️ ${label}: resposta sem <retEvento> — XML salvo sem protocolo; use "Regerar XML"`)
+      return
+    }
+    try {
+      fs.writeFileSync(xmlFilePath, buildProcEventoNFe(signedXml, retEventoXml))
+    } catch (e: any) {
+      this.logger.error(`❌ ${label}: falha ao montar procEventoNFe (${e?.message}) — XML salvo sem protocolo`)
+    }
+  }
+
+  // ===========================================================
+  // Regerar XML autorizado (NFs emitidas antes da correção do nfeProc)
+  // Consulta o protocolo na SEFAZ (NFeConsultaProtocolo4) e monta o nfeProc.
+  // A consulta também devolve os eventos (cancelamento/CC-e) já com protocolo.
+  // ===========================================================
+  async regenerarXmlAutorizado(id: string, opts: { enviarEmail?: boolean } = {}) {
+    if (getSefazEnv() === 'simulator') {
+      throw new BadRequestException('Regerar XML exige SEFAZ real (indisponível no modo simulador).')
+    }
+
+    const nfe = await this.prisma.nfe.findUnique({
+      where: { id },
+      include: { company: true, events: true },
+    })
+    if (!nfe) throw new BadRequestException('NF-e não encontrada.')
+    if (!['authorized', 'canceled'].includes(nfe.status as any)) {
+      throw new BadRequestException('Só é possível regerar XML de NF autorizada ou cancelada.')
+    }
+    if (!nfe.xmlPath || !fs.existsSync(path.resolve(nfe.xmlPath))) {
+      throw new BadRequestException(`XML da NF ${nfe.number} não encontrado no servidor.`)
+    }
+
+    const absPath = path.resolve(nfe.xmlPath)
+    const atual = fs.readFileSync(absPath, 'utf-8')
+    const chNFe = atual.match(/Id="NFe(\d{44})"/)?.[1]
+    if (!chNFe) throw new BadRequestException(`Chave de acesso não encontrada no XML da NF ${nfe.number}.`)
+    // Consulta no mesmo ambiente em que a NF foi autorizada (lido do próprio XML)
+    const tpAmb: '1' | '2' = tagValue(atual, 'tpAmb') === '1' ? '1' : '2'
+
+    const { certBuffer, certPassword } = this.loadCertificate(nfe.company)
+    const resposta = await this.callSefazConsultaProtocolo(chNFe, tpAmb, certBuffer, certPassword)
+    const ret = extractElement(resposta, 'retConsSitNFe')
+    if (!ret) throw new BadRequestException('Resposta da SEFAZ não reconhecida (sem retConsSitNFe).')
+
+    const cStat = tagValue(ret, 'cStat') ?? '?'
+    const xMotivo = tagValue(ret, 'xMotivo') ?? ''
+    // 100/150 autorizada · 101/151/155 cancelada · 110 denegada
+    if (!['100', '101', '110', '150', '151', '155'].includes(cStat)) {
+      throw new BadRequestException(`SEFAZ: ${xMotivo} (cStat ${cStat})`)
+    }
+
+    // ── NF-e ────────────────────────────────────────────────────────────────
+    let nfeResultado: 'atualizado' | 'ja_ok' = 'ja_ok'
+    let xmlFinal = atual
+    if (!isNfeProc(atual)) {
+      const prot = extractElement(ret, 'protNFe')
+      if (!prot) throw new BadRequestException(`SEFAZ não devolveu o protocolo da NF ${nfe.number}.`)
+      const check = protocolMatchesNfe(atual, prot)
+      if (!check.ok) throw new BadRequestException(`NF ${nfe.number}: ${check.motivo}. Arquivo não alterado.`)
+      xmlFinal = buildNfeProc(atual, prot)
+      this.backupXmlSemProtocolo(absPath)
+      fs.writeFileSync(absPath, xmlFinal)
+      nfeResultado = 'atualizado'
+    }
+
+    // ── Eventos (cancelamento 110111, CC-e 110110) ──────────────────────────
+    let eventosAtualizados = 0
+    for (const proc of extractAllElements(ret, 'procEventoNFe')) {
+      const tpEvento = tagValue(proc, 'tpEvento')
+      const nSeq = Number(tagValue(proc, 'nSeqEvento') ?? 1)
+      const tipo = tpEvento === '110111' ? 'cancel' : tpEvento === '110110' ? 'cce' : null
+      if (!tipo) continue
+      const evento = (nfe as any).events?.find((e: any) =>
+        e.type === tipo && e.status === 'authorized' &&
+        (tipo === 'cancel' || Number((e.payload as any)?.nSeqEvento ?? 1) === nSeq),
+      )
+      const evPath = (evento?.payload as any)?.xmlPath
+      if (!evPath || !fs.existsSync(path.resolve(evPath))) continue
+      const evAbs = path.resolve(evPath)
+      if (isProcEvento(fs.readFileSync(evAbs, 'utf-8'))) continue
+      const procComNs = /^<procEventoNFe[^>]*\sxmlns=/.test(proc)
+        ? proc
+        : proc.replace(/^<procEventoNFe/, '<procEventoNFe xmlns="http://www.portalfiscal.inf.br/nfe"')
+      this.backupXmlSemProtocolo(evAbs)
+      fs.writeFileSync(evAbs, `<?xml version="1.0" encoding="UTF-8"?>${procComNs}`)
+      eventosAtualizados++
+    }
+
+    this.logger.log(`🔁 NF ${nfe.number}: XML ${nfeResultado}, ${eventosAtualizados} evento(s) atualizado(s) — SEFAZ cStat=${cStat}`)
+
+    let emailEnviado = false
+    if (opts.enviarEmail && nfeResultado === 'atualizado' && nfe.status === 'authorized' && getSefazEnv() === 'producao') {
+      await this.sendNfeEmail(nfe.id, xmlFinal, nfe.number ?? '')
+      emailEnviado = true
+    }
+
+    return { numero: nfe.number, nfe: nfeResultado, eventosAtualizados, situacaoSefaz: xMotivo, emailEnviado }
+  }
+
+  // Regera todas as NFs (autorizadas/canceladas) cujo XML ainda não tem protocolo.
+  // Sequencial e com pausa entre consultas para não acionar o bloqueio por
+  // consumo indevido da SEFAZ (cStat 656). Não envia e-mails.
+  async regenerarXmlsPendentes(tenantId: string, companyId: string) {
+    if (getSefazEnv() === 'simulator') {
+      throw new BadRequestException('Corrigir XMLs exige SEFAZ real (indisponível no modo simulador).')
+    }
+    const nfes = await this.prisma.nfe.findMany({
+      where: { tenantId, companyId, status: { in: ['authorized', 'canceled'] as any[] }, xmlPath: { not: null } },
+      include: { events: true },
+      orderBy: { number: 'asc' },
+    })
+
+    const pendentes = nfes.filter(n => {
+      const abs = path.resolve(n.xmlPath!)
+      if (!fs.existsSync(abs)) return false
+      if (!isNfeProc(fs.readFileSync(abs, 'utf-8'))) return true
+      return (n as any).events?.some((e: any) => {
+        const p = (e.payload as any)?.xmlPath
+        return e.status === 'authorized' && p && fs.existsSync(path.resolve(p)) &&
+          !isProcEvento(fs.readFileSync(path.resolve(p), 'utf-8'))
+      })
+    })
+
+    const resultado = { total: pendentes.length, atualizadas: 0, eventosAtualizados: 0, erros: [] as { numero: any; motivo: string }[] }
+    for (const n of pendentes) {
+      try {
+        const r = await this.regenerarXmlAutorizado(n.id)
+        if (r.nfe === 'atualizado') resultado.atualizadas++
+        resultado.eventosAtualizados += r.eventosAtualizados
+      } catch (e: any) {
+        resultado.erros.push({ numero: n.number, motivo: e?.message ?? String(e) })
+      }
+      await new Promise(r => setTimeout(r, 500))
+    }
+    this.logger.log(`🔁 Regeração em lote: ${resultado.atualizadas}/${resultado.total} NFs, ${resultado.eventosAtualizados} eventos, ${resultado.erros.length} erro(s)`)
+    return resultado
+  }
+
+  // Guarda o arquivo original antes de sobrescrever (pasta backup_sem_protocolo)
+  private backupXmlSemProtocolo(absPath: string) {
+    const dir = path.join(path.dirname(absPath), 'backup_sem_protocolo')
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    const destino = path.join(dir, path.basename(absPath))
+    if (!fs.existsSync(destino)) fs.copyFileSync(absPath, destino)
+  }
+
+  // Certificado A1: banco (certA1Keystore) → arquivo local certs/tapajos-cert.pfx
+  private loadCertificate(company: any): { certBuffer: Buffer; certPassword: string } {
+    if (company?.certA1Keystore) {
+      return { certBuffer: Buffer.from(company.certA1Keystore), certPassword: company.certA1Password ?? '' }
+    }
+    const certPath = path.resolve('certs/tapajos-cert.pfx')
+    if (fs.existsSync(certPath)) {
+      return { certBuffer: fs.readFileSync(certPath), certPassword: process.env.CERT_PASSWORD ?? '' }
+    }
+    throw new BadRequestException(
+      'Certificado digital não encontrado. Faça o upload do certificado A1 no cadastro da empresa.',
+    )
+  }
+
+  private buildSefazAgent(certBuffer: Buffer, certPassword: string): https.Agent {
+    const p12 = forge.pkcs12.pkcs12FromAsn1(forge.asn1.fromDer(certBuffer.toString('binary')), certPassword)
+    const oids = forge.pki.oids as any
+    const keyBags = p12.getBags({ bagType: oids.pkcs8ShroudedKeyBag })[oids.pkcs8ShroudedKeyBag] ?? []
+    const certBags = p12.getBags({ bagType: oids.certBag })[oids.certBag] ?? []
+    return new https.Agent({
+      key: forge.pki.privateKeyToPem(keyBags[0].key!),
+      cert: forge.pki.certificateToPem(certBags[0].cert!),
+      rejectUnauthorized: false, // ICP-Brasil CA não está no bundle padrão do Node.js
+    })
+  }
+
+  // ===========================================================
+  // Chamada SEFAZ — consulta protocolo (NFeConsultaProtocolo4)
+  // Devolve o texto bruto da resposta (para recortar protNFe/procEventoNFe)
+  // ===========================================================
+  private async callSefazConsultaProtocolo(
+    chNFe: string,
+    tpAmb: '1' | '2',
+    certBuffer: Buffer,
+    certPassword: string,
+  ): Promise<string> {
+    const ws = 'http://www.portalfiscal.inf.br/nfe/wsdl/NFeConsultaProtocolo4'
+    const soapEnvelope = `<?xml version="1.0" encoding="utf-8"?><soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope"><soap12:Header><nfeCabecMsg xmlns="${ws}"><cUF>${process.env.SEFAZ_UF ?? '35'}</cUF><versaoDados>4.00</versaoDados></nfeCabecMsg></soap12:Header><soap12:Body><nfeDadosMsg xmlns="${ws}"><consSitNFe versao="4.00" xmlns="http://www.portalfiscal.inf.br/nfe"><tpAmb>${tpAmb}</tpAmb><xServ>CONSULTAR</xServ><chNFe>${chNFe}</chNFe></consSitNFe></nfeDadosMsg></soap12:Body></soap12:Envelope>`
+    const url = tpAmb === '1'
+      ? 'https://nfe.fazenda.sp.gov.br/ws/NFeConsultaProtocolo4.asmx'
+      : 'https://homologacao.nfe.fazenda.sp.gov.br/ws/NFeConsultaProtocolo4.asmx'
+
+    try {
+      const res = await axios.post(url, soapEnvelope, {
+        httpsAgent: this.buildSefazAgent(certBuffer, certPassword),
+        headers: { 'Content-Type': 'application/soap+xml; charset=utf-8', 'SOAPAction': '""' },
+        timeout: 30_000,
+        responseType: 'text',
+      })
+      return String(res.data)
+    } catch (err: any) {
+      const msg = err?.message ?? 'Erro de comunicação com SEFAZ'
+      this.logger.error(`❌ Erro na consulta de protocolo: ${msg}`)
+      throw new BadRequestException(`Falha na comunicação com SEFAZ: ${msg}`)
+    }
+  }
+
+  // ===========================================================
   // Chamada SEFAZ — eventos (NFeRecepcaoEvento4)
   // ===========================================================
   private async callSefazEvento(
     signedXml: string,
     certBuffer: Buffer,
     certPassword: string,
-  ): Promise<{ cStat: string; xMotivo: string; nProt: string | null }> {
+  ): Promise<{ cStat: string; xMotivo: string; nProt: string | null; retEventoXml: string | null }> {
     const mode = getSefazEnv()
 
     if (mode === 'simulator') {
       this.logger.log('📋 SEFAZ em modo SIMULADOR — evento não transmitido')
-      return { cStat: '135', xMotivo: 'Evento registrado (simulação)', nProt: 'SIMULADO' }
+      return { cStat: '135', xMotivo: 'Evento registrado (simulação)', nProt: 'SIMULADO', retEventoXml: null }
     }
 
     // Extrai o elemento <envEvento> do XML assinado
@@ -2351,7 +2535,9 @@ export class NfeEmitService {
 
   private async parseSefazEventoResponse(
     soapXml: string,
-  ): Promise<{ cStat: string; xMotivo: string; nProt: string | null }> {
+  ): Promise<{ cStat: string; xMotivo: string; nProt: string | null; retEventoXml: string | null }> {
+    // Recorta o <retEvento> do texto original — entra byte a byte no procEventoNFe
+    const retEventoXml = typeof soapXml === 'string' ? extractElement(soapXml, 'retEvento') : null
     try {
       const parsed = await xml2js.parseStringPromise(soapXml, { explicitArray: false })
       const body = parsed?.['soap:Envelope']?.['soap:Body']
@@ -2367,10 +2553,10 @@ export class NfeEmitService {
       const xMotivo: string = String(infEvento?.xMotivo ?? retEnvEvento?.xMotivo ?? 'Resposta não reconhecida')
       const nProt: string | null = infEvento?.nProt ?? null
       this.logger.log(`📡 SEFAZ evento resposta: cStat=${cStat} — ${xMotivo}`)
-      return { cStat, xMotivo, nProt }
+      return { cStat, xMotivo, nProt, retEventoXml }
     } catch {
       this.logger.warn('⚠️ Não foi possível parsear resposta SOAP do evento SEFAZ')
-      return { cStat: 'PARSE_ERROR', xMotivo: 'Erro ao interpretar resposta SEFAZ', nProt: null }
+      return { cStat: 'PARSE_ERROR', xMotivo: 'Erro ao interpretar resposta SEFAZ', nProt: null, retEventoXml }
     }
   }
 
@@ -2381,13 +2567,13 @@ export class NfeEmitService {
     signedXml: string,
     certBuffer: Buffer | null,
     certPassword: string,
-  ): Promise<{ cStat: string; xMotivo: string; nProt: string | null }> {
+  ): Promise<{ cStat: string; xMotivo: string; nProt: string | null; protNFeXml: string | null }> {
     const mode = getSefazEnv()
 
     // ── Modo Simulador: resposta fake, sem chamada de rede ────────────────────
     if (mode === 'simulator') {
       this.logger.log('📋 SEFAZ em modo SIMULADOR — nenhuma chamada de rede realizada')
-      return { cStat: 'SIMULADO', xMotivo: 'Autorizado (simulação local)', nProt: null }
+      return { cStat: 'SIMULADO', xMotivo: 'Autorizado (simulação local)', nProt: null, protNFeXml: null }
     }
 
     // ── Modo Real: SOAP 1.2 para SEFAZ-SP ────────────────────────────────���────
@@ -2446,7 +2632,10 @@ export class NfeEmitService {
   // Extrai os campos relevantes da resposta SOAP do SEFAZ
   private async parseSefazResponse(
     soapXml: string,
-  ): Promise<{ cStat: string; xMotivo: string; nProt: string | null }> {
+  ): Promise<{ cStat: string; xMotivo: string; nProt: string | null; protNFeXml: string | null }> {
+    // Recorta o <protNFe> do texto original da resposta (não do objeto parseado):
+    // ele entra byte a byte no nfeProc de distribuição
+    const protNFeXml = typeof soapXml === 'string' ? extractElement(soapXml, 'protNFe') : null
     try {
       const parsed = await xml2js.parseStringPromise(soapXml, { explicitArray: false })
 
@@ -2476,10 +2665,10 @@ export class NfeEmitService {
         : (nfeDadosRet?.xMotivo ?? nfeDadosRet?.['ns1:xMotivo'] ?? 'Resposta não reconhecida')
 
       this.logger.log(`📡 SEFAZ resposta: cStat=${cStat} — ${xMotivo}`)
-      return { cStat, xMotivo, nProt }
+      return { cStat, xMotivo, nProt, protNFeXml }
     } catch {
       this.logger.warn('⚠️ Não foi possível parsear a resposta SOAP do SEFAZ')
-      return { cStat: 'PARSE_ERROR', xMotivo: 'Erro ao interpretar resposta SEFAZ', nProt: null }
+      return { cStat: 'PARSE_ERROR', xMotivo: 'Erro ao interpretar resposta SEFAZ', nProt: null, protNFeXml }
     }
   }
 

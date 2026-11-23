@@ -19,6 +19,7 @@
 10. [Preparação para Deploy em Produção](#10-preparação-para-deploy-em-produção)
 11. [Backup e Recuperação](#11-backup-e-recuperação)
 12. [Estrutura de Arquivos Importantes](#12-estrutura-de-arquivos-importantes)
+13. [Suporte Remoto: Logs, Sentry e Tailscale](#13-suporte-remoto-logs-sentry-e-tailscale)
 
 ---
 
@@ -782,6 +783,233 @@ docker compose down && docker compose build --no-cache && docker compose up -d
 docker exec -it erp_db psql -U postgres -d erp -c \
   "SELECT MAX(number) as ultimo_numero FROM \"Nfe\" WHERE \"tenantId\" = 'T-001';"
 ```
+
+---
+
+## 13. Suporte Remoto: Logs, Sentry e Tailscale
+
+> Objetivo: quando o cliente disser "deu erro", você consegue **ver o que aconteceu**
+> sem ir até lá.
+>
+> O ciclo é: cliente reporta (ou o Sentry avisa por e-mail) → você entra no PC do
+> cliente pelo Tailscale → lê o log → corrige no notebook → gera a nova versão →
+> o cliente atualiza.
+
+### 13.1 Onde ficam os logs
+
+A API grava **um arquivo por dia** e também continua escrevendo no console (`docker logs`).
+
+| Onde | Caminho |
+|---|---|
+| PC do cliente (Windows) | `C:\ERP-Deploy\logs\api-AAAA-MM-DD.log` |
+| Dentro do container | `/usr/src/app/logs` (é a mesma pasta, montada como volume) |
+| Dev (notebook, fora do Docker) | `./logs` na raiz do projeto |
+
+- Arquivos de dias anteriores são **compactados** (`.log.gz`) e apagados depois de **30 dias**.
+- Cada linha é um JSON. Exemplo de uma requisição:
+  ```json
+  {"context":"HTTP","level":"info","message":"GET /dashboard/summary 200 130ms","method":"GET","route":"/dashboard/summary","user":"fulano@empresa.com.br","status":200,"durationMs":130,"timestamp":"2026-11-23T21:23:57.845Z"}
+  ```
+- O horário (`timestamp`) está em **UTC**: subtraia 3 horas para ter o horário de Brasília.
+- Configuração: `LOG_DIR` (pasta) e `LOG_LEVEL` (`error`, `warn`, `info`, `debug`) no `.env.prod`.
+  Arquivos de código: `src/common/observability/`.
+
+**O que o log registra e o que NÃO registra:**
+
+| Registra | Nunca registra |
+|---|---|
+| Método e rota (o padrão, ex.: `/customers/:id`) | Corpo da requisição e da resposta (clientes, valores, CNPJs) |
+| E-mail do usuário logado | Query string (`?busca=...`) |
+| Status HTTP e duração | Headers, token JWT, senha |
+| Mensagem do erro (CNPJ/CPF/chave mascarados) | Mensagens do Prisma (podem conter a query inteira) |
+| Tudo o que os serviços escrevem com `this.logger.log/warn/error` | `console.log` (vai só para o `docker logs`) |
+
+> ⚠️ Os serviços podem escrever nomes de clientes nas próprias mensagens
+> (`this.logger.log(...)`). O arquivo fica **no PC do cliente**, mas trate-o como
+> confidencial: **nunca** cole trechos de log em issues do GitHub (o repositório é público).
+
+### 13.2 Sentry: aviso de erro por e-mail (opcional)
+
+O Sentry é um serviço que recebe os erros graves (respostas 5xx e exceções não
+tratadas) e te manda um e-mail com o stack trace. Sem a variável `SENTRY_DSN`, ele
+fica desligado e nada muda.
+
+**Criar a conta e o projeto (uma vez só):**
+
+1. Acesse <https://sentry.io/signup/> e crie a conta (o plano gratuito *Developer* basta para um cliente).
+2. Ao criar a organização, escolha a região de dados (EU ou US; para LGPD, a EU costuma ser a escolha mais confortável).
+3. Clique em **Create Project** → plataforma **NestJS** → em alertas, deixe *"Alert me on every new issue"* → nome `erp-api` → **Create Project**.
+4. Na tela seguinte (ou em **Settings → Projects → erp-api → Client Keys (DSN)**), copie o **DSN**. Ele parece com `https://abc123...@o000000.ingest.us.sentry.io/0000000`.
+5. Em **Settings → Security & Privacy** da organização, confira que *Data Scrubber*, *Use Default Scrubbers* e *Prevent Storing of IP Addresses* estão **ligados**. É uma segunda camada de proteção: a API já remove corpo, cookies, tokens e query string antes de enviar.
+6. **Não** instale o "wizard" (`npx @sentry/wizard`) nem cole o código de exemplo que o site sugere: o ERP já está configurado em `src/instrument.ts`.
+
+**Ligar no PC do cliente:**
+
+1. Abra `C:\ERP-Deploy\.env.prod` e acrescente a linha `SENTRY_DSN=<o DSN copiado>`.
+2. Recrie o container da API (só `restart` **não** relê o `.env.prod`):
+   ```powershell
+   cd C:\ERP-Deploy
+   docker compose -f docker-compose.prod.yml up -d api
+   ```
+3. Confira se a última linha do boot diz `(Sentry ativo)`:
+   ```powershell
+   docker logs erp_api --since 5m | Select-String "escutando"
+   ```
+
+O Sentry identifica cada erro com `environment` (= `SEFAZ_ENV`, ex.: `producao`) e
+`release` (= `erp-api@<versão do package.json>`). Por isso, **suba a versão no
+`package.json` a cada entrega**: assim você sabe em qual versão o erro apareceu.
+
+> O DSN não é uma senha forte (só permite *enviar* erros), mas mesmo assim fica só
+> no `.env.prod` do cliente, nunca no repositório.
+
+### 13.3 Tailscale: uma "rede privada" entre o seu notebook e o PC do cliente
+
+O Tailscale cria uma rede privada criptografada (chamada *tailnet*) entre os seus
+aparelhos, sem abrir porta no roteador do cliente. Cada máquina ganha um nome
+(ex.: `tapajos-erp`) e um IP `100.x.y.z` que só os aparelhos do seu tailnet enxergam.
+
+**Passo 1: criar a conta (no notebook)**
+
+1. Acesse <https://login.tailscale.com/start> e entre com uma conta Google, Microsoft ou GitHub. O plano gratuito *Personal* é suficiente.
+2. **Ative a verificação em duas etapas (2FA)** nessa conta Google/Microsoft/GitHub: quem entrar nela entra no PC do cliente.
+
+**Passo 2: instalar no notebook do desenvolvedor**
+
+1. Baixe em <https://tailscale.com/download/windows> e instale (próximo → próximo).
+2. Clique no ícone do Tailscale perto do relógio → **Log in** → entre com a conta do Passo 1.
+
+**Passo 3: instalar no PC do cliente** (precisa ser feito uma vez, presencialmente ou com o cliente te ajudando por telefone/AnyDesk)
+
+1. Mesmo instalador: <https://tailscale.com/download/windows>.
+2. **Log in** com **a mesma conta** do Passo 1. Assim os dois aparelhos caem no mesmo tailnet.
+3. Ícone do Tailscale → **Preferences** → marque **Run unattended**. Sem isso, o Tailscale só conecta quando alguém está logado no Windows.
+4. Em **Configurações do Windows → Sistema → Energia**, deixe "Suspender" em **Nunca** quando ligado na tomada. PC dormindo = PC inacessível.
+
+**Passo 4: ajustar no painel** (<https://login.tailscale.com/admin/machines>)
+
+1. Na linha do PC do cliente: **⋯ → Edit machine name** → `tapajos-erp`.
+2. **⋯ → Disable key expiry**. Por padrão a máquina "desloga" a cada 180 dias, e você perderia o acesso justamente quando precisasse.
+3. Na aba **DNS**, confira que **MagicDNS** está ligado (é o que permite usar o nome `tapajos-erp` em vez do IP).
+
+**Passo 5: testar (no notebook)**
+
+```powershell
+tailscale status
+```
+
+```powershell
+ping tapajos-erp
+```
+
+Se o `ping` responder, a rede está funcionando.
+
+### 13.4 Entrar no PC do cliente
+
+Há duas formas. A **B (SSH)** é a mais leve e funciona em qualquer Windows.
+
+**Opção A: Área de Trabalho Remota (você vê a tela do cliente)**
+
+> Só funciona se o PC do cliente for **Windows Pro** (veja em *Configurações → Sistema → Sobre → Edição*).
+> No Windows **Home** não há servidor de Área de Trabalho Remota: use a opção B.
+> Atenção: ao conectar, a sessão do usuário que está no PC é **bloqueada**. Combine com o cliente antes.
+
+1. No PC do cliente: *Configurações → Sistema → Área de Trabalho Remota → Ativar*.
+2. O usuário do Windows precisa ter **senha** (forte).
+3. No notebook: tecla Windows → digite `mstsc` → em *Computador*, coloque `tapajos-erp` → Conectar → usuário e senha do Windows do cliente.
+
+**Opção B: SSH (só linha de comando, não atrapalha quem está usando o PC)**
+
+No PC do cliente, abra o **PowerShell como Administrador** e rode, um por vez:
+
+```powershell
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+```
+
+```powershell
+Start-Service sshd
+```
+
+```powershell
+Set-Service -Name sshd -StartupType Automatic
+```
+
+No notebook, conecte usando o usuário do Windows do cliente:
+
+```powershell
+ssh usuario@tapajos-erp
+```
+
+Para não digitar senha toda vez (e mais seguro), use chave SSH:
+
+1. No notebook: `ssh-keygen -t ed25519` (aperte Enter em tudo). A chave pública fica em `C:\Users\<você>\.ssh\id_ed25519.pub`.
+2. Se o usuário do cliente for **administrador** do Windows, cole o conteúdo desse `.pub` no PC do cliente em `C:\ProgramData\ssh\administrators_authorized_keys` (para usuário comum: `C:\Users\<usuario>\.ssh\authorized_keys`).
+
+### 13.5 Ler os logs remotamente
+
+Depois de entrar por SSH ou Área de Trabalho Remota, no PowerShell do PC do cliente:
+
+```powershell
+# Listar os arquivos de log (um por dia)
+Get-ChildItem C:\ERP-Deploy\logs
+
+# Últimas 50 linhas do log de hoje
+Get-Content "C:\ERP-Deploy\logs\api-$(Get-Date -Format yyyy-MM-dd).log" -Tail 50
+
+# Só os erros do log de hoje
+Select-String -Path "C:\ERP-Deploy\logs\api-$(Get-Date -Format yyyy-MM-dd).log" -Pattern '"level":"error"'
+
+# Acompanhar em tempo real (Ctrl+C para sair)
+Get-Content "C:\ERP-Deploy\logs\api-$(Get-Date -Format yyyy-MM-dd).log" -Wait -Tail 10
+
+# Console do container na última hora (inclui console.log e mensagens de boot)
+docker logs erp_api --since 1h
+
+# Só erros do console na última hora
+docker logs erp_api --since 1h 2>&1 | Select-String "ERROR"
+```
+
+Para trazer um arquivo para o notebook (rodando **no notebook**):
+
+```powershell
+scp usuario@tapajos-erp:C:/ERP-Deploy/logs/api-2026-11-23.log .
+```
+
+Arquivos antigos (`.log.gz`): abra com o 7-Zip, ou no Git Bash use `zcat api-2026-11-01.log.gz | less`.
+
+**Roteiro rápido quando o cliente reportar um problema:**
+
+1. Pergunte **o horário aproximado** e **o que ele estava fazendo** (ex.: "emitindo NF").
+2. Abra o log do dia e procure linhas com `"level":"error"` perto desse horário (lembre: o log está em UTC, ou seja, 14h de Brasília = `17:` no log).
+3. A linha `HTTP` mostra a rota e a mensagem; a linha de erro logo antes ou depois (outro `context`, ex.: `NfeEmitService`) costuma ter o stack trace.
+4. Se o Sentry estiver ligado, o mesmo erro estará lá com o stack trace completo e a versão.
+
+### 13.6 Recomendações de segurança
+
+1. **Fechar a porta 5432 do Postgres (importante).** Hoje o `docker-compose.prod.yml`
+   publica o banco na rede local (`ports: - "5432:5432"`) com usuário e senha `postgres`.
+   Qualquer computador da rede do cliente consegue ler e apagar o banco. A API **não
+   precisa** dessa porta: ela fala com o banco pela rede interna do Docker (`db:5432`).
+   Sugestão de mudança no serviço `db` do `docker-compose.prod.yml`:
+   ```yaml
+   # antes
+       ports:
+         - "5432:5432"
+   # depois: remover as duas linhas acima, ou, se precisar acessar do próprio PC:
+       ports:
+         - "127.0.0.1:5432:5432"
+   ```
+   Para consultar o banco depois disso, entre por SSH e use
+   `docker exec -it erp_db psql -U postgres -d erp`. Num segundo momento, troque também a
+   senha padrão `postgres`.
+   *(Esta mudança ainda **não** foi feita no arquivo: precisa ser aplicada e testada num deploy.)*
+2. **Não use** os recursos *Tailscale Funnel* / *Serve*: eles publicam serviços na internet.
+3. **2FA** na conta usada no Tailscale e no Sentry.
+4. **Senha forte** no usuário do Windows do cliente (exigida pela Área de Trabalho Remota) e, no SSH, prefira chave.
+5. **Autorização do cliente:** combine por escrito (e-mail serve) que você tem acesso
+   remoto para suporte e que os logs ficam no PC dele. Isso é boa prática de LGPD.
+6. **Revogar acesso:** se o notebook for perdido ou roubado, remova-o em
+   <https://login.tailscale.com/admin/machines> (**⋯ → Remove**).
 
 ---
 

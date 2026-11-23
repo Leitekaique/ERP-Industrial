@@ -4,6 +4,7 @@ import { MailService } from '../mail/mail.service'
 import { Decimal } from '@prisma/client/runtime/library'
 import { buildBillingPdf, BillingPdfData } from './billing-pdf'
 import { BILLING_EMAIL, NON_BILLING_CFOPS } from '../../config/office.config'
+import { reconciliarNfsCanceladas, recalcularTotalFatura } from './billing-sync'
 
 // ─── Billing Service ──────────────────────────────────────────────────────────
 //
@@ -83,6 +84,13 @@ export class BillingService {
     const startOfMonth = new Date(year, month - 1, 1)
     const endOfMonth = new Date(year, month, 0, 23, 59, 59)
 
+    // Rede de segurança: tira do A Receber qualquer NF cancelada deste cliente
+    // que ainda esteja num recebível ativo (dados anteriores à correção)
+    const reconc = await reconciliarNfsCanceladas(this.prisma, { tenantId, companyId, customerId })
+    if (reconc.nfsCorrigidas.length) {
+      this.logger.warn(`⚠️ NFs canceladas retiradas do A Receber antes de faturar: ${reconc.nfsCorrigidas.join(', ')}`)
+    }
+
     // Filtra por createdAt (mês em que a NF foi emitida / recebível foi gerado),
     // NÃO por dueDate — pois clientes dia15/dia20 têm vencimento no mês seguinte.
     const receivables = await this.prisma.receivable.findMany({
@@ -115,6 +123,7 @@ export class BillingService {
     for (const [dateKey, recs] of groups.entries()) {
       // Normaliza dueDate ao início do dia (00:00:00 UTC)
       const dueDate = new Date(dateKey + 'T00:00:00.000Z')
+      // Valor inicial da fatura nova (o definitivo é recalculado após vincular)
       const totalAmount = recs.reduce(
         (acc, r) => acc.add(new Decimal(r.amount as any)),
         new Decimal(0),
@@ -125,25 +134,36 @@ export class BillingService {
         where: { tenantId, companyId, customerId, dueDate },
       })
 
-      let billing: any
-      if (existing) {
-        billing = await this.prisma.billing.update({
-          where: { id: existing.id },
-          data: { totalAmount, status: 'open' as any, sentAt: null },
-        })
-      } else {
-        billing = await this.prisma.billing.create({
-          data: { tenantId, companyId, customerId, month, year, dueDate, totalAmount, status: 'open' as any },
-        })
+      if (existing?.status === 'paid') {
+        throw new BadRequestException(
+          `A fatura ${existing.billingNumber} (vencimento ${dateKey.split('-').reverse().join('/')}) já está paga. ` +
+          `Há recebíveis novos com o mesmo vencimento — registre-os à parte.`
+        )
       }
 
-      await this.prisma.receivable.updateMany({
-        where: { id: { in: recs.map(r => r.id) } },
-        data: { billingId: billing.id },
+      const billing = await this.prisma.$transaction(async (tx) => {
+        const b = existing
+          ? await tx.billing.update({
+              where: { id: existing.id },
+              data: { status: 'open' as any, sentAt: null }, // mudou o conteúdo → precisa reenviar
+            })
+          : await tx.billing.create({
+              data: { tenantId, companyId, customerId, month, year, dueDate, totalAmount, status: 'open' as any },
+            })
+
+        await tx.receivable.updateMany({
+          where: { id: { in: recs.map(r => r.id) } },
+          data: { billingId: b.id },
+        })
+
+        // Total = TODOS os recebíveis vinculados (antes: só os novos, e o valor
+        // dos que já estavam na fatura se perdia)
+        await recalcularTotalFatura(tx, b.id)
+        return tx.billing.findUnique({ where: { id: b.id } })
       })
 
       this.logger.log(
-        `✅ Billing gerado: ${billing.id} — ${customer.name} — vencimento ${dateKey} — R$ ${totalAmount.toFixed(2)}`
+        `✅ Billing gerado: ${billing!.id} — ${customer.name} — vencimento ${dateKey} — R$ ${new Decimal(billing!.totalAmount).toFixed(2)}`
       )
       createdBillings.push(billing)
     }
@@ -385,14 +405,30 @@ export class BillingService {
 
   // ── Cancela e desvincula os receivables ─────────────────────────────────────
   async cancel(id: string) {
-    await this.prisma.receivable.updateMany({
-      where: { billingId: id },
-      data: { billingId: null },
+    return this.prisma.$transaction(async (tx) => {
+      await tx.receivable.updateMany({
+        where: { billingId: id },
+        data: { billingId: null },
+      })
+      await tx.billing.update({
+        where: { id },
+        data: { status: 'open' as any, sentAt: null },
+      })
+      await recalcularTotalFatura(tx, id) // sem recebíveis → total 0
+      return tx.billing.findUnique({ where: { id } })
     })
-    return this.prisma.billing.update({
-      where: { id },
-      data: { status: 'open' as any, sentAt: null },
-    })
+  }
+
+  // ── Corrige NFs canceladas que ainda estão no A Receber / em faturas ───────
+  // simular=true mostra o que mudaria sem gravar nada
+  async reconciliarCanceladas(params: { tenantId: string; companyId: string; simular?: boolean }) {
+    const r = await reconciliarNfsCanceladas(this.prisma, params)
+    this.logger.log(
+      `🔎 Reconciliação NFs canceladas (${r.simulacao ? 'simulação' : 'aplicada'}): ` +
+      `${r.nfsCorrigidas.length} NF(s), ${r.recebiveisCancelados} recebível(is) cancelado(s), ` +
+      `${r.recebiveisAjustados} ajustado(s), ${r.faturasRecalculadas.length} fatura(s)`
+    )
+    return r
   }
 
   // ── Recebíveis em aberto sem fatura (a12) ─────────────────────────────────

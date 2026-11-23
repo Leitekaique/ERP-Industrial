@@ -133,6 +133,8 @@ model NfeImport {
   serie         String?  // ide.serie
   modelo        String?  // ide.mod (opcional)
 
+  stockLots     StockLot[] // lotes de estoque criados por esta NF
+
   @@index([tenantId, companyId])
 }
 
@@ -569,9 +571,10 @@ model StockLot {
   warehouseId String
 
   // Origem
-  empresaId  String // Company dona do material
+  empresaId  String // empresa de origem/dona: cliente (material de terceiro), fornecedor (insumo importado) ou a própria Tapajós
   reference  String? // cNF ou referência manual
   occurredAt DateTime // data da NF / entrada
+  nfeImportId String? // NF de entrada que criou o lote (null = entrada manual, conversão antiga etc.)
 
   // Processo do LOTE (independente do cadastro do produto)
   processo String
@@ -589,10 +592,13 @@ model StockLot {
   company   Company   @relation("LotEmpresaSistema", fields: [companyId], references: [id])
   product   Product   @relation(fields: [productId], references: [id])
   warehouse Warehouse @relation(fields: [warehouseId], references: [id])
+  nfeImport NfeImport? @relation(fields: [nfeImportId], references: [id], onDelete: SetNull)
+  movements StockMovement[]
 
   @@index([tenantId, companyId])
   @@index([productId])
   @@index([processo])
+  @@index([nfeImportId])
 }
 
 model StockMovement {
@@ -611,6 +617,8 @@ model StockMovement {
   reference   String?
   note        String?
   receiptImagePath String?  // E.1: foto do romaneio de entrada
+  lotId       String?        // lote afetado por este movimento (1 movimento = 1 lote)
+  unit        String?        // unidade da quantidade (= unidade do lote)
   occurredAt  DateTime       @default(now())
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @default(now()) @updatedAt
@@ -620,10 +628,12 @@ model StockMovement {
   supplier    Supplier?      @relation(fields: [supplierId], references: [id])
   tenant      Tenant         @relation(fields: [tenantId], references: [id])
   warehouse   Warehouse      @relation(fields: [warehouseId], references: [id])
+  lot         StockLot?      @relation(fields: [lotId], references: [id], onDelete: SetNull)
 
   @@index([tenantId, companyId, productId, warehouseId])
   @@index([tenantId, companyId, ownership])
   @@index([pairId])
+  @@index([lotId])
 }
 
 model Supplier {

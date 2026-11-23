@@ -23,7 +23,16 @@ export default function CancelNfeModal({ nfe, onClose, onSuccess }: Props) {
   const [justificativa, setJustificativa] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [result, setResult] = useState<{ eventoId: string } | null>(null)
+  const [result, setResult] = useState<{
+    eventoId: string
+    // Efeito do cancelamento no A Receber / faturas (retornado pela API)
+    financeiro?: {
+      recebiveisCancelados: number
+      recebiveisAjustados: number
+      faturasRecalculadas: { numero: number; totalAnterior: number; totalNovo: number; status: string }[]
+      avisos: string[]
+    }
+  } | null>(null)
 
   const minLen = 15
   const maxLen = 255
@@ -48,6 +57,7 @@ export default function CancelNfeModal({ nfe, onClose, onSuccess }: Props) {
 
   if (result) {
     const num = String(nfe.number).padStart(9, '0')
+    const fin = result.financeiro
     return (
       <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
         <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4">
@@ -62,6 +72,19 @@ export default function CancelNfeModal({ nfe, onClose, onSuccess }: Props) {
           <p className="text-sm text-slate-600">
             A NF-e nº <strong>{nfe.number}</strong> foi cancelada. Um e-mail com o comprovante foi enviado automaticamente.
           </p>
+          {fin && (fin.recebiveisCancelados > 0 || fin.recebiveisAjustados > 0) && (
+            <p className="text-sm text-slate-600">
+              O valor desta NF foi retirado do A Receber
+              {fin.faturasRecalculadas.length > 0 &&
+                ` e da fatura ${fin.faturasRecalculadas.map(f => f.numero).join(', ')}`}.
+            </p>
+          )}
+          {fin && fin.avisos.length > 0 && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 space-y-1">
+              <p className="font-semibold">Atenção no financeiro</p>
+              {fin.avisos.map((a, i) => <p key={i}>{a}</p>)}
+            </div>
+          )}
           <div className="flex gap-2">
             <button
               className="flex-1 px-3 py-2 rounded-lg text-sm bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors"
