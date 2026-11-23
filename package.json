@@ -1,6 +1,6 @@
 {
   "name": "erp-backend",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "ERP Tapajós API - Backend NestJS + Prisma + PostgreSQL",
   "author": "Kaique Leite",
   "license": "MIT",

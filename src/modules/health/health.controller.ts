@@ -6,7 +6,8 @@ export class HealthController {
   @Public()
   @Get()
   get() {
-    return { ok: true, uptime: process.uptime(), timestamp: new Date().toISOString() }
+    // version: tag da imagem (vX.Y.Z) — o script de atualização do cliente confere por aqui
+    return { ok: true, version: process.env.APP_VERSION ?? 'dev', uptime: process.uptime(), timestamp: new Date().toISOString() }
   }
 
   @Public()

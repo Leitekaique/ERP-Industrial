@@ -1,0 +1,109 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Publica uma versão do ERP Tapajós
+#
+# Como usar (no notebook de desenvolvimento):
+#   git tag v1.1.0
+#   git push origin v1.1.0
+#
+# O que acontece aqui, nos servidores do GitHub (sem usar o seu Docker):
+#   1. Constrói as imagens da API e do frontend (com cache — só refaz o que mudou)
+#   2. Publica no GitHub Container Registry:
+#        ghcr.io/leitekaique/erp-api:v1.1.0   (e :latest)
+#        ghcr.io/leitekaique/erp-web:v1.1.0   (e :latest)
+#   3. Cria a "Release" v1.1.0 no GitHub com a lista de commits
+#
+# No PC do cliente, ATUALIZAR_ERP.bat baixa essas imagens (só as camadas que
+# mudaram) e reinicia o sistema. Ver docs/GUIA_MANTENEDOR.md, seção 14.
+#
+# "Run workflow" manual (aba Actions) serve para testar: publica só com a tag
+# informada, sem :latest e sem Release — o cliente não recebe nada sozinho.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Publicar versão
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      versao:
+        description: 'Tag da imagem de teste (ex.: teste-1)'
+        required: true
+
+permissions:
+  contents: write   # criar a Release
+  packages: write   # publicar no ghcr.io
+
+env:
+  # GHCR exige o dono em minúsculas
+  IMAGEM_BASE: ghcr.io/leitekaique
+
+jobs:
+  imagens:
+    name: Imagem ${{ matrix.nome }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - nome: erp-api
+            contexto: .
+          - nome: erp-web
+            contexto: ./web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versão
+        id: v
+        run: echo "versao=${{ inputs.versao || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login no GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags da imagem
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGEM_BASE }}/${{ matrix.nome }}
+          tags: |
+            type=raw,value=${{ steps.v.outputs.versao }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+
+      - name: Construir e publicar
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.contexto }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # API usa APP_VERSION; frontend usa as VITE_* (as que não existem num
+          # Dockerfile são simplesmente ignoradas)
+          build-args: |
+            APP_VERSION=${{ steps.v.outputs.versao }}
+            VITE_APP_VERSION=${{ steps.v.outputs.versao }}
+            VITE_API_URL=http://localhost:3000
+            VITE_TENANT_ID=T-001
+            VITE_COMPANY_ID=C-001
+          cache-from: type=gha,scope=${{ matrix.nome }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.nome }}
+
+  release:
+    name: Release no GitHub
+    needs: imagens
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Criar Release com a lista de commits
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "ERP Tapajós ${{ github.ref_name }}" \
+            --generate-notes \
+            --notes "Imagens: ${IMAGEM_BASE}/erp-api:${{ github.ref_name }} e ${IMAGEM_BASE}/erp-web:${{ github.ref_name }}. Atualizar o cliente: ATUALIZAR_ERP.bat -Versao ${{ github.ref_name }}"

@@ -1,0 +1,6 @@
+# Não enviar ao build: dependências locais (são reinstaladas com npm ci,
+# e as do Windows nem funcionariam no Linux), build antigo e variáveis locais
+node_modules
+dist
+.env
+.env.*

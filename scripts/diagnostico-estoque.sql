@@ -4,10 +4,12 @@
 -- Rodar DEPOIS da atualização que traz a migração 20261123130000_estoque_vinculo_lote
 -- (ela liga movimentos a lotes; sem ela este script não funciona).
 --
--- No PC do cliente (PowerShell):
---   Get-Content .\scripts\diagnostico-estoque.sql | docker exec -i erp_db psql -U postgres -d erp
--- ou, para guardar o resultado num arquivo:
---   Get-Content .\scripts\diagnostico-estoque.sql | docker exec -i erp_db psql -U postgres -d erp > diagnostico.txt
+-- No PC do cliente (PowerShell, na pasta C:\ERP-Deploy). O arquivo vai e volta
+-- por docker cp: o pipe do PowerShell 5.1 (Get-Content | docker exec, ou >)
+-- estraga os acentos.
+--   docker cp .\diagnostico-estoque.sql erp_db:/tmp/diag.sql
+--   docker exec erp_db psql -U postgres -d erp -f /tmp/diag.sql -o /tmp/diagnostico.txt
+--   docker cp erp_db:/tmp/diagnostico.txt .\diagnostico.txt
 --
 -- Toda a execução roda numa transação somente leitura.
 -- ============================================================================

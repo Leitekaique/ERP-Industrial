@@ -1,0 +1,71 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ERP Tapajós — produção (PC do cliente, pasta C:\ERP-Deploy)
+#
+# As imagens vêm do GitHub Container Registry, na versão gravada em
+# C:\ERP-Deploy\.env  (ERP_VERSION=v1.1.0) — quem escreve esse arquivo é o
+# ATUALIZAR_ERP.bat. Para voltar de versão: ATUALIZAR_ERP.bat -Versao v1.0.9
+#
+# Senhas e certificado NÃO ficam aqui: ficam no .env.prod (fora do Git).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Nome FIXO do projeto: o volume do banco se chama "erp-deploy_postgres_data".
+# Se este nome mudar, o Docker cria um banco NOVO E VAZIO. Não altere.
+name: erp-deploy
+
+services:
+  db:
+    image: postgres:15
+    container_name: erp_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: erp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # Só o próprio PC acessa o banco (antes: qualquer máquina da rede local)
+      - "127.0.0.1:5432:5432"
+    networks:
+      - erp_network
+
+  api:
+    image: ghcr.io/leitekaique/erp-api:${ERP_VERSION:-latest}
+    container_name: erp_api
+    restart: always
+    depends_on:
+      - db
+    env_file:
+      - .env.prod
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./uploads:/usr/src/app/uploads
+      - ./logs:/usr/src/app/logs
+      - ./certs:/usr/src/app/certs
+    networks:
+      - erp_network
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    command: ["./entrypoint.sh"]
+    environment:
+      DATABASE_URL: "postgresql://postgres:postgres@db:5432/erp?schema=public"
+
+  web:
+    image: ghcr.io/leitekaique/erp-web:${ERP_VERSION:-latest}
+    container_name: erp_web
+    restart: always
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+    networks:
+      - erp_network
+
+volumes:
+  postgres_data:
+
+networks:
+  erp_network:
+    driver: bridge

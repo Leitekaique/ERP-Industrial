@@ -20,6 +20,7 @@
 11. [Backup e Recuperação](#11-backup-e-recuperação)
 12. [Estrutura de Arquivos Importantes](#12-estrutura-de-arquivos-importantes)
 13. [Suporte Remoto: Logs, Sentry e Tailscale](#13-suporte-remoto-logs-sentry-e-tailscale)
+14. [Atualização do Cliente: Pipeline de Versões](#14-atualização-do-cliente-pipeline-de-versões)
 
 ---
 
@@ -1002,7 +1003,8 @@ Arquivos antigos (`.log.gz`): abra com o 7-Zip, ou no Git Bash use `zcat api-202
    Para consultar o banco depois disso, entre por SSH e use
    `docker exec -it erp_db psql -U postgres -d erp`. Num segundo momento, troque também a
    senha padrão `postgres`.
-   *(Esta mudança ainda **não** foi feita no arquivo: precisa ser aplicada e testada num deploy.)*
+   *(Aplicada no compose do pipeline novo, `deploy/cliente/docker-compose.prod.yml`, com
+   `127.0.0.1:5432:5432` — vale a partir da primeira atualização pelo modelo novo; ver seção 14.)*
 2. **Não use** os recursos *Tailscale Funnel* / *Serve*: eles publicam serviços na internet.
 3. **2FA** na conta usada no Tailscale e no Sentry.
 4. **Senha forte** no usuário do Windows do cliente (exigida pela Área de Trabalho Remota) e, no SSH, prefira chave.
@@ -1010,6 +1012,148 @@ Arquivos antigos (`.log.gz`): abra com o 7-Zip, ou no Git Bash use `zcat api-202
    remoto para suporte e que os logs ficam no PC dele. Isso é boa prática de LGPD.
 6. **Revogar acesso:** se o notebook for perdido ou roubado, remova-o em
    <https://login.tailscale.com/admin/machines> (**⋯ → Remove**).
+
+---
+
+## 14. Atualização do Cliente: Pipeline de Versões
+
+Substitui o processo antigo (build local `--no-cache` → `erp-deploy.tar` de vários GB →
+pendrive → `docker load`). O `.tar` continua existindo, mas só como **plano B**.
+
+### 14.1 Visão geral
+
+```
+Notebook (dev)                 GitHub                              PC do cliente
+──────────────                 ──────                              ─────────────
+git tag v1.1.0     ──push──▶   Actions constrói as imagens         ATUALIZAR_ERP.bat
+git push origin v1.1.0         e publica no ghcr.io:          ◀──  1. backup do banco
+                                 erp-api:v1.1.0, erp-web:v1.1.0     2. baixa só o que mudou
+                               + Release v1.1.0 (lista de commits)  3. sobe a versão nova
+                                                                    4. confere o /health
+```
+
+- **Por que é melhor:** ninguém constrói imagem no notebook; o download no cliente é de
+  dezenas de MB (só as camadas que mudaram), não GB; cada versão tem nome (`v1.1.0`), então
+  dá para saber o que está rodando e **voltar** para a anterior com um comando.
+- **Versão visível:** na barra lateral do sistema e em `http://localhost:3000/health`
+  (campo `version`).
+- **Migrações** do banco continuam automáticas (`entrypoint.sh`). Correções de dados
+  também devem virar migração — nada de script SQL manual.
+
+Arquivos envolvidos:
+
+| Arquivo | Onde roda | Para quê |
+|---|---|---|
+| `.github/workflows/publicar-versao.yml` | GitHub | Constrói e publica as imagens a cada tag `vX.Y.Z` |
+| `deploy/cliente/docker-compose.prod.yml` | Cliente | Sistema em produção usando as imagens versionadas |
+| `deploy/cliente/ATUALIZAR_ERP.bat` + `atualizar-erp.ps1` | Cliente | Atualizar / voltar versão |
+| `deploy/cliente/backup-banco.ps1` | Cliente | Backup diário (substitui `backup-diario.ps1`) |
+| `deploy/cliente/corrigir-backup-antigo.ps1` | Cliente | Recupera acentos de backups antigos |
+| `deploy/gerar-pacote.ps1` | Notebook | Plano B: gera o `.tar` de uma versão |
+
+### 14.2 Publicar uma versão (no notebook)
+
+1. Tudo commitado e enviado (`git push`).
+2. Escolha o número — `vMAIOR.MENOR.CORREÇÃO`:
+   - `v1.1.0 → v1.1.1`: só correções;
+   - `v1.1.0 → v1.2.0`: funcionalidade nova;
+   - `v1.x → v2.0.0`: mudança grande/incompatível.
+3. Crie e envie a tag:
+   ```powershell
+   git tag v1.1.0
+   git push origin v1.1.0
+   ```
+4. Acompanhe em **GitHub → Actions → "Publicar versão"** (~5 min na primeira vez; depois,
+   com cache, menos). Verde = imagens publicadas e Release criada.
+
+> Errou algo numa versão já publicada? **Não reaproveite o número**: publique a seguinte
+> (`v1.1.1`). Versão publicada nunca muda — é isso que torna o "voltar" confiável.
+
+### 14.3 Visibilidade das imagens (uma vez)
+
+Na primeira publicação o GitHub cria os pacotes `erp-api` e `erp-web`
+(**github.com/Leitekaique?tab=packages**). Escolha uma opção:
+
+- **Públicos (mais simples):** em cada pacote → **Package settings → Change visibility →
+  Public**. O cliente baixa sem senha. As imagens não têm senhas nem dados (eles ficam no
+  `.env.prod` e no banco, no PC do cliente) — só o código, que já é público no repositório.
+- **Privados:** crie um token em **GitHub → Settings → Developer settings → Personal access
+  tokens (classic)** só com `read:packages`, e no PC do cliente rode **uma vez**:
+  ```powershell
+  docker login ghcr.io -u Leitekaique
+  # senha: cole o token
+  ```
+
+### 14.4 Migração única do cliente para o modelo novo
+
+Faça com o sistema fora de uso (ex.: fim do expediente). Pode ser remoto, via Tailscale (seção 13).
+
+1. Publique a primeira versão (14.2) — por exemplo `v1.1.0`.
+2. No PC do cliente, **guarde** o compose antigo:
+   `Rename-Item C:\ERP-Deploy\docker-compose.prod.yml docker-compose.prod.antigo.yml`
+3. Copie para `C:\ERP-Deploy` os arquivos de `deploy\cliente\` do repositório:
+   `docker-compose.prod.yml`, `ATUALIZAR_ERP.bat`, `atualizar-erp.ps1`, `backup-banco.ps1`,
+   `corrigir-backup-antigo.ps1`. O `.env.prod`, `certs\` e `uploads\` **ficam como estão**.
+4. Dê dois cliques em **`ATUALIZAR_ERP.bat`** (ou `ATUALIZAR_ERP.bat -Versao v1.1.0`).
+   O script confere que o banco atual (`erp-deploy_postgres_data`) existe, faz backup,
+   baixa as imagens e sobe. Ao final mostra **"ERP Tapajos atualizado para v1.1.0"**.
+5. No **Agendador de Tarefas**, troque a ação do backup diário para:
+   `powershell.exe -ExecutionPolicy Bypass -File "C:\ERP-Deploy\backup-banco.ps1"`
+6. Depois da primeira atualização (já com as correções de nov/2026):
+   - **Emissão NF-e → "Corrigir XMLs (protocolo)"**;
+   - **Faturamento → "Verificar NFs canceladas"**;
+   - diagnóstico do estoque (copie `scripts\diagnostico-estoque.sql` do repositório para
+     `C:\ERP-Deploy`; o arquivo vai e volta por `docker cp` para não estragar acentos):
+     ```powershell
+     docker cp .\diagnostico-estoque.sql erp_db:/tmp/diag.sql
+     docker exec erp_db psql -U postgres -d erp -f /tmp/diag.sql -o /tmp/diagnostico.txt
+     docker cp erp_db:/tmp/diagnostico.txt .\diagnostico.txt
+     ```
+     e envie o `diagnostico.txt` para análise.
+
+> **Se o script parar dizendo que o volume do banco não existe:** não use
+> `-PrimeiraInstalacao`! Isso criaria um banco vazio. Rode `docker volume ls` e veja o nome
+> do volume atual; o projeto antigo pode ter outro nome de pasta. Ajuste antes de seguir.
+
+### 14.5 Dia a dia: atualizar, voltar, plano B
+
+```powershell
+ATUALIZAR_ERP.bat                     # última versão publicada
+ATUALIZAR_ERP.bat -Versao v1.2.0      # versão específica
+ATUALIZAR_ERP.bat -Versao v1.1.0      # VOLTAR (a versão anterior fica em versao-anterior.txt)
+```
+
+- Cada execução gera `backups\antes-<versão>-<data>.sql` e o registro
+  `logs\atualizacao-<data>.log`.
+- **Voltar versão** troca o programa, não o banco. Se a versão nova tiver migração de banco,
+  ao voltar o banco continua migrado — em geral funciona (migrações só acrescentam), mas se
+  a versão anterior der erro, restaure o backup `antes-<versão>` (seção 11).
+- Se a API não responder em 3 minutos, o script mostra o log e o comando exato para voltar.
+
+**Plano B — sem GitHub/internet no cliente:**
+
+1. No notebook:
+   ```powershell
+   powershell.exe -ExecutionPolicy Bypass -File deploy\gerar-pacote.ps1 -Versao v1.2.0
+   # GitHub fora do ar? acrescente -ConstruirLocal (constrói aqui, ~10 min)
+   ```
+   Gera `deploy\pacotes\erp-v1.2.0.tar`.
+2. Leve o `.tar` para `C:\ERP-Deploy` (pendrive ou rede) e rode:
+   `ATUALIZAR_ERP.bat -Versao v1.2.0 -Pacote C:\ERP-Deploy\erp-v1.2.0.tar`
+
+### 14.6 Backups antigos com acentos quebrados
+
+Até nov/2026, `backup-diario.ps1` e `backup-semanal-gdrive.ps1` gravavam o dump pelo pipe do
+PowerShell 5.1, que **corrompe os acentos** (`IMPORTAÇÃO` → `IMPORTA├ç├âO`). Os dados não se
+perderam — dá para reverter sem perda:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File corrigir-backup-antigo.ps1 -Arquivo backups\erp-backup-2026-11-20_12-00.sql
+# gera erp-backup-2026-11-20_12-00.corrigido.sql — use ESTE para restaurar
+```
+
+Os scripts novos (`backup-banco.ps1` e a etapa de backup do `ATUALIZAR_ERP.bat`) geram o
+arquivo dentro do container e copiam com `docker cp`, sem passar pelo pipe.
 
 ---
 

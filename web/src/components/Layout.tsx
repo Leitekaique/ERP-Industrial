@@ -23,6 +23,9 @@ import {
   ClipboardCheck,
 } from 'lucide-react'
 
+// Versão da imagem publicada (tag vX.Y.Z injetada no build do GitHub Actions); "dev" localmente
+const APP_VERSION = import.meta.env.VITE_APP_VERSION || 'dev'
+
 // ─── Estrutura de navegação ───────────────────────────────────────────────────
 
 // roles: undefined = todos | ['ADMIN'] = só admin
@@ -195,7 +198,7 @@ export default function Layout() {
             <LogOut size={16} />
             <span>Sair</span>
           </button>
-          <p className="mt-2 text-[9px] text-tapajos-700 select-none">v1.0.0</p>
+          <p className="mt-2 text-[9px] text-tapajos-700 select-none">{APP_VERSION}</p>
         </div>
       </aside>
 
@@ -274,7 +277,7 @@ export default function Layout() {
               : <><ChevronLeft size={16} className="shrink-0" /><span>Recolher</span></>
             }
           </button>
-          {!collapsed && <p className="px-2 text-[9px] text-tapajos-700 select-none">v1.0.0</p>}
+          {!collapsed && <p className="px-2 text-[9px] text-tapajos-700 select-none">{APP_VERSION}</p>}
         </div>
       </aside>
 

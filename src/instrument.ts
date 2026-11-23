@@ -37,7 +37,10 @@ function readVersion(): string | undefined {
 const dsn = process.env.SENTRY_DSN
 
 if (dsn) {
-  const version = readVersion()
+  // Versão da imagem publicada (tag vX.Y.Z, via APP_VERSION no Dockerfile);
+  // fora do pipeline (dev local) usa a versão do package.json
+  const appVersion = process.env.APP_VERSION
+  const version = appVersion && appVersion !== 'dev' ? appVersion : readVersion()
 
   Sentry.init({
     dsn,

@@ -56,6 +56,8 @@ patch-*.js
 # ── Arquivos de deploy e produção (contêm caminhos/senhas do servidor) ────────
 copiar-deploy.ps1
 docker-compose.prod.yml
+# exceção: o compose do cliente do pipeline novo não tem segredos (ficam no .env.prod)
+!deploy/cliente/docker-compose.prod.yml
 erp-api.tar
 scripts/1_preparar_deploy.ps1
 scripts/2_instalar_cliente.ps1
@@ -81,3 +83,6 @@ docs/*.xlsx
 docs/restaurar_*
 docs/corrigir_cnpj_*
 docs/excluir_nf_*
+
+# Pacotes .tar do plano B (centenas de MB)
+deploy/pacotes/

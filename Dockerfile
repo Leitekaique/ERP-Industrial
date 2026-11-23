@@ -30,6 +30,11 @@ FROM node:22-bookworm-slim AS runtime
 
 WORKDIR /usr/src/app
 
+# Versão da imagem (tag git vX.Y.Z, injetada pelo GitHub Actions).
+# Aparece em GET /health e no log de inicialização.
+ARG APP_VERSION=dev
+ENV APP_VERSION=$APP_VERSION
+
 # Instala libs necessárias no container
 RUN apt-get update && apt-get install -y \
   openssl \
