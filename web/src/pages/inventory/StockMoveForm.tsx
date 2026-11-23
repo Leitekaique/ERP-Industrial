@@ -4,6 +4,7 @@ import { FormField } from '../../components/FormField'
 import { api } from '../../lib/api'
 import { useProducts, useWarehouses } from '../../lib/useApi'
 import { useEmpresasOrigem } from '../../lib/useEmpresasOrigem'
+import { SearchableSelect } from '../../components/ui/SearchableSelect'
 
 export default function StockMoveForm() {
   const tenantId = 'T-001'
@@ -17,118 +18,130 @@ export default function StockMoveForm() {
   const { data: warehouses = [] } = useWarehouses()
   const { data: empresas = [] } = useEmpresasOrigem({ tenantId, companyId })
 
-  // 🔹 estado principal
   const [selectedProductId, setSelectedProductId] = useState(productId ?? '')
   const [type, setType] = useState<'in' | 'out'>(
-    location.state?.fromList ? 'out' : 'in'
+    location.state?.fromList ? 'out' : 'in',
   )
   const [warehouseId, setWarehouseId] = useState('')
   const [quantity, setQuantity] = useState('')
   const [unit, setUnit] = useState('')
   const [empresaOrigemId, setEmpresaOrigemId] = useState('')
   const [note, setNote] = useState('')
+  const [reference, setReference] = useState('')
   const [generateCharge, setGenerateCharge] = useState(false)
   const [receiptFile, setReceiptFile] = useState<File | null>(null)
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null)
+  const [submitError, setSubmitError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
 
-  // Usa horário local (não UTC) como default
   const localISO = () => {
     const now = new Date()
     return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
   }
   const [occurredAt, setOccurredAt] = useState(localISO)
 
-  // 🔹 unidade vinda do estoque (pós conversão)
   useEffect(() => {
-    if (location.state?.unit) {
-      setUnit(location.state.unit)
-    }
+    if (location.state?.unit) setUnit(location.state.unit)
+    if (location.state?.empresaOrigemId) setEmpresaOrigemId(location.state.empresaOrigemId)
   }, [location.state])
 
-  // 🔹 carrega dados do produto
   useEffect(() => {
     if (!selectedProductId || !products.length) return
-
-    const p = products.find(p => p.id === selectedProductId)
+    const p = products.find((p: any) => p.id === selectedProductId)
     if (p) {
       setUnit(prev => prev || p.unit)
-      setEmpresaOrigemId(p.empresaId ?? '')
+      setEmpresaOrigemId(prev => prev || p.empresaId || '')
     }
   }, [selectedProductId, products])
 
-  // 🔹 depósito padrão
   useEffect(() => {
-    if (!warehouseId && warehouses.length === 1) {
-      setWarehouseId(warehouses[0].id)
-    }
+    if (!warehouseId && warehouses.length === 1) setWarehouseId((warehouses[0] as any).id)
   }, [warehouses, warehouseId])
+
+  // Produto selecionado — para avisos inline
+  const selectedProduct = products.find((p: any) => p.id === selectedProductId) as any | undefined
+  const chargeWillBeSkipped = generateCharge && type === 'out' && selectedProduct && !selectedProduct.customerId
 
   function handleReceiptChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0] ?? null
     setReceiptFile(file)
-    if (file) {
-      const url = URL.createObjectURL(file)
-      setReceiptPreview(url)
-    } else {
-      setReceiptPreview(null)
-    }
+    setReceiptPreview(file ? URL.createObjectURL(file) : null)
   }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
+    setSubmitError(null)
 
     if (!selectedProductId || !warehouseId || !quantity) {
-      alert('Preencha os campos obrigatórios')
+      setSubmitError('Preencha produto, depósito e quantidade.')
       return
     }
 
-    // Upload da imagem do romaneio, se houver
-    let receiptImagePath: string | undefined
-    if (receiptFile) {
-      const fd = new FormData()
-      fd.append('file', receiptFile)
-      const res = await api.post('/inventory/stock/upload-receipt', fd, {
-        headers: { 'Content-Type': 'multipart/form-data' },
+    setSubmitting(true)
+    try {
+      let receiptImagePath: string | undefined
+      if (receiptFile) {
+        const fd = new FormData()
+        fd.append('file', receiptFile)
+        const res = await api.post('/inventory/stock/upload-receipt', fd, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        })
+        receiptImagePath = res.data?.imagePath
+      }
+
+      await api.post('/inventory/stock/move', {
+        tenantId,
+        companyId,
+        productId: selectedProductId,
+        warehouseId,
+        type,
+        quantity: Math.round(Number(quantity) * 100) / 100,
+        unit,
+        empresaOrigemId,
+        reference: reference.trim() || undefined,
+        occurredAt: new Date(occurredAt),
+        note,
+        ...(receiptImagePath ? { receiptImagePath } : {}),
+        ...(type === 'out' ? { generateCharge } : {}),
       })
-      receiptImagePath = res.data?.imagePath
+
+      nav('/inventory/stock')
+    } catch (err: any) {
+      const msg =
+        err?.response?.data?.message ??
+        err?.message ??
+        'Erro ao registrar movimentação.'
+      setSubmitError(Array.isArray(msg) ? msg.join(' | ') : String(msg))
+    } finally {
+      setSubmitting(false)
     }
-
-    await api.post('/inventory/stock/move', {
-      tenantId,
-      companyId,
-      productId: selectedProductId,
-      warehouseId,
-      type,
-      quantity: Number(quantity),
-      unit,
-      empresaOrigemId,
-      occurredAt: new Date(occurredAt),
-      note,
-      ...(receiptImagePath ? { receiptImagePath } : {}),
-      ...(type === 'out' && { generateCharge }),
-    })
-
-    nav('/inventory/stock')
   }
+
+  const productOptions = (products as any[])
+    .map(p => ({
+      value: p.id,
+      label: `${p.sku} — ${p.name}`,
+      sublabel: p.empresaOrigem?.name ?? undefined,
+    }))
 
   return (
     <form className="max-w-xl space-y-3" onSubmit={submit}>
       <h2 className="text-xl font-semibold">Movimentar estoque</h2>
 
+      {submitError && (
+        <div className="border border-red-300 bg-red-50 text-red-700 rounded px-4 py-3 text-sm">
+          {submitError}
+        </div>
+      )}
+
       <FormField label="Produto">
-        <select
-          className="border rounded px-3 py-2 w-full"
+        <SearchableSelect
           value={selectedProductId}
-          onChange={e => setSelectedProductId(e.target.value)}
-          required
-        >
-          <option value="">Selecionar</option>
-          {products.map(p => (
-            <option key={p.id} value={p.id}>
-              {p.sku} — {p.name}
-            </option>
-          ))}
-        </select>
+          onChange={setSelectedProductId}
+          placeholder="— Selecione o produto —"
+          emptyLabel="— Selecione o produto —"
+          options={productOptions}
+        />
       </FormField>
 
       <FormField label="Tipo">
@@ -150,10 +163,8 @@ export default function StockMoveForm() {
           required
         >
           <option value="">Selecionar</option>
-          {warehouses.map(w => (
-            <option key={w.id} value={w.id}>
-              {w.name}
-            </option>
+          {(warehouses as any[]).map(w => (
+            <option key={w.id} value={w.id}>{w.name}</option>
           ))}
         </select>
       </FormField>
@@ -166,7 +177,6 @@ export default function StockMoveForm() {
             disabled
           />
         </FormField>
-
         <FormField label="Quantidade">
           <input
             type="number"
@@ -182,8 +192,18 @@ export default function StockMoveForm() {
       <FormField label="Empresa origem">
         <input
           className="border rounded px-3 py-2 w-full bg-gray-100"
-          value={empresas.find(e => e.id === empresaOrigemId)?.name ?? '—'}
+          value={(empresas as any[]).find(e => e.id === empresaOrigemId)?.name ?? '—'}
           disabled
+        />
+      </FormField>
+
+      <FormField label="Referência / NF" hint="Número de NF, romaneio ou outra referência para rastrear a origem">
+        <input
+          type="text"
+          className="border rounded px-3 py-2 w-full"
+          placeholder="Ex.: 1-006089, Romaneio 3240…"
+          value={reference}
+          onChange={e => setReference(e.target.value)}
         />
       </FormField>
 
@@ -205,15 +225,25 @@ export default function StockMoveForm() {
       </FormField>
 
       {type === 'out' && (
-        <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer select-none">
-          <input
-            type="checkbox"
-            className="w-4 h-4 rounded"
-            checked={generateCharge}
-            onChange={e => setGenerateCharge(e.target.checked)}
-          />
-          <span>Gerar cobrança <span className="text-slate-400 font-normal">(cria A Receber com preço × qtd conforme prazo do cliente)</span></span>
-        </label>
+        <div className="space-y-1">
+          <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              className="w-4 h-4 rounded"
+              checked={generateCharge}
+              onChange={e => setGenerateCharge(e.target.checked)}
+            />
+            <span>
+              Gerar cobrança{' '}
+              <span className="text-slate-400 font-normal">(cria A Receber com preço × qtd conforme prazo do cliente)</span>
+            </span>
+          </label>
+          {chargeWillBeSkipped && (
+            <p className="text-xs text-amber-600 ml-6">
+              Produto sem cliente vinculado — nenhuma cobrança será gerada.
+            </p>
+          )}
+        </div>
       )}
 
       {type === 'in' && (
@@ -235,8 +265,11 @@ export default function StockMoveForm() {
       )}
 
       <div className="flex gap-2 pt-3">
-        <button className="px-4 py-2 bg-black text-white rounded">
-          Confirmar
+        <button
+          className="px-4 py-2 bg-black text-white rounded disabled:opacity-50"
+          disabled={submitting}
+        >
+          {submitting ? 'Salvando...' : 'Confirmar'}
         </button>
         <button
           type="button"

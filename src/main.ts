@@ -1,3 +1,4 @@
+import 'dotenv/config'
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core'
 import { AppModule } from './app.module'
@@ -12,9 +13,14 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.useGlobalInterceptors(new TenantCompanyInterceptor());
 
-  // CORS liberado para dev web no Vite (localhost:5173)
+  // CORS: dev (Vite :5173) + prod (nginx :80) + rede local
   app.enableCors({
-    origin: ['http://localhost:5173'],
+    origin: [
+      'http://localhost:5173',
+      'http://localhost',
+      'http://localhost:80',
+      /^http:\/\/192\.168\.\d+\.\d+$/,   // acesso via rede local
+    ],
     credentials: false,
   })
   app.use(json({ limit: '10mb' }))

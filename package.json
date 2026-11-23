@@ -1,12 +1,13 @@
 {
   "name": "erp-backend",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "description": "ERP Tapajós API - Backend NestJS + Prisma + PostgreSQL",
   "author": "Kaique Leite",
   "license": "MIT",
   "scripts": {
     "start": "nest start",
     "start:dev": "nest start --watch",
+    "start:local": "npx tsc -p tsconfig.json && node dist/main",
     "start:debug": "nest start --debug --watch",
     "seed": "docker compose exec api node prisma/seed.cjs",
     "build": "nest build",

@@ -3,6 +3,9 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { useNfeCreateDraftFromStock, useCompany } from '../../lib/useApi'
 import { api } from '../../lib/api'
+import { SearchableSelect } from '../../components/ui/SearchableSelect'
+
+const RETORNO_CFOPS = new Set(['5209', '6209', '5902', '6902', '5903', '6903', '5916', '6916', '5949', '6949', '5925', '6925'])
 
 export default function NfeEmitFromStockPage() {
   const nav = useNavigate()
@@ -118,20 +121,19 @@ export default function NfeEmitFromStockPage() {
 
 
   const totals = useMemo(() => {
-    let totalPmo = 0
-    let totalProdutos = 0
+    let total5902 = 0
+    let totalServicosInsumos = 0
 
     for (const it of items) {
       const lineTotal = toPtNumber(it.qty ?? 0) * toPtNumber(it.unitPrice ?? 0)
-      const isPmo = (it?.meta?.kind ?? '') === 'PMO'
-      if (isPmo) totalPmo += lineTotal
-      else totalProdutos += lineTotal
+      if (RETORNO_CFOPS.has(String(it.cfop))) total5902 += lineTotal
+      else totalServicosInsumos += lineTotal
     }
 
     return {
-      totalPmo,
-      totalProdutos,
-      totalNf: totalPmo + totalProdutos,
+      total5902,
+      totalServicosInsumos,
+      totalNf: total5902 + totalServicosInsumos,
     }
   }, [items])
 
@@ -207,46 +209,6 @@ export default function NfeEmitFromStockPage() {
         </button>
       </div>
 
-      {/* EMITENTE */}
-      {company && (
-        <div className="border rounded-lg p-4 space-y-2">
-          <h3 className="font-semibold text-gray-800 text-sm">Emitente</h3>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 p-3 bg-blue-50 rounded border border-blue-100 text-sm">
-            <div className="md:col-span-2">
-              <span className="block text-xs text-gray-500 mb-0.5">Razão social</span>
-              <span className="font-medium text-gray-800">{company.legalName ?? company.tradeName ?? '—'}</span>
-            </div>
-            <div>
-              <span className="block text-xs text-gray-500 mb-0.5">Nome fantasia</span>
-              <span className="font-medium text-gray-800">{company.tradeName ?? '—'}</span>
-            </div>
-            <div>
-              <span className="block text-xs text-gray-500 mb-0.5">CNPJ</span>
-              <span className="font-medium text-gray-800">{company.cnpj ?? '—'}</span>
-            </div>
-            <div>
-              <span className="block text-xs text-gray-500 mb-0.5">IE</span>
-              <span className="font-medium text-gray-800">{company.ie ?? '—'}</span>
-            </div>
-            <div>
-              <span className="block text-xs text-gray-500 mb-0.5">CRT</span>
-              <span className="font-medium text-gray-800">{company.crt ?? '—'}</span>
-            </div>
-            <div>
-              <span className="block text-xs text-gray-500 mb-0.5">Alíq. crédito ICMS SN</span>
-              <span className="font-medium text-gray-800">{company.icmsSnRate != null ? `${Number(company.icmsSnRate).toFixed(2)}%` : '—'}</span>
-            </div>
-            <div className="md:col-span-4">
-              <span className="block text-xs text-gray-500 mb-0.5">Endereço</span>
-              <span className="font-medium text-gray-800">
-                {[company.address, company.number, company.district, company.city, company.uf, company.zip ? `CEP ${company.zip}` : null]
-                  .filter(Boolean).join(', ') || '—'}
-              </span>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* DESTINATÁRIO */}
       <div className="border rounded-lg p-4 space-y-3">
         <h3 className="font-semibold text-gray-800">Destinatário <span className="text-red-500">*</span></h3>
@@ -274,20 +236,17 @@ export default function NfeEmitFromStockPage() {
             <span className="block text-sm font-medium text-gray-700 mb-1">
               {recipientTipo === 'CUSTOMER' ? 'Cliente' : 'Fornecedor'} <span className="text-red-500">*</span>
             </span>
-            <select
-              className="w-full border rounded px-3 py-2 text-sm"
+            <SearchableSelect
               value={recipientId}
-              onChange={e => setRecipientId(e.target.value)}
-            >
-              <option value="">— Selecione —</option>
-              {recipientTipo === 'CUSTOMER'
-                ? customers.map((c: any) => (
-                    <option key={c.id} value={c.id}>{c.nome ?? c.name}</option>
-                  ))
-                : suppliers.map((s: any) => (
-                    <option key={s.id} value={s.id}>{s.nome ?? s.name}</option>
-                  ))}
-            </select>
+              onChange={setRecipientId}
+              emptyLabel="— Selecione —"
+              placeholder="— Selecione —"
+              options={(recipientTipo === 'CUSTOMER' ? customers : suppliers as any[]).map((x: any) => ({
+                value: x.id,
+                label: x.nome ?? x.name ?? '',
+                sublabel: x.document ?? x.cnpj ?? undefined,
+              }))}
+            />
           </div>
         </div>
 
@@ -492,10 +451,12 @@ export default function NfeEmitFromStockPage() {
       <div className="border rounded-lg px-4 py-3 bg-gray-50 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-5 text-sm text-gray-700">
           <span><span className="text-gray-500">Itens:</span> <strong>{items.length}</strong></span>
-          {totals.totalPmo > 0 && (
-            <span><span className="text-gray-500">PMO:</span> <strong>R$ {totals.totalPmo.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</strong></span>
+          {totals.total5902 > 0 && (
+            <span><span className="text-gray-500">Produtos (retorno):</span> <strong>R$ {totals.total5902.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</strong></span>
           )}
-          <span><span className="text-gray-500">Produtos:</span> <strong>R$ {totals.totalProdutos.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</strong></span>
+          {totals.totalServicosInsumos > 0 && (
+            <span><span className="text-gray-500">Serv./Insumos:</span> <strong>R$ {totals.totalServicosInsumos.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</strong></span>
+          )}
           <span><span className="text-gray-500">Total NF:</span> <strong>R$ {totals.totalNf.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</strong></span>
         </div>
 

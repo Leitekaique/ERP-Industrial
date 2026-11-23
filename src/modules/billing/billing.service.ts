@@ -3,7 +3,7 @@ import { PrismaService } from '../../database/prisma.service'
 import { MailService } from '../mail/mail.service'
 import { Decimal } from '@prisma/client/runtime/library'
 import { buildBillingPdf, BillingPdfData } from './billing-pdf'
-import { OFFICE_EMAIL } from '../../config/office.config'
+import { BILLING_EMAIL, NON_BILLING_CFOPS } from '../../config/office.config'
 
 // ─── Billing Service ──────────────────────────────────────────────────────────
 //
@@ -55,7 +55,7 @@ export class BillingService {
         customer: { select: { id: true, name: true, email: true, accountantEmail: true, emailFinanceiro: true } },
         receivables: { select: { id: true, amount: true, dueDate: true, status: true, nfeId: true } },
       },
-      orderBy: [{ dueDate: 'desc' }],
+      orderBy: [{ billingNumber: 'desc' }],
       take: 200,
     })
   }
@@ -153,17 +153,41 @@ export class BillingService {
 
   // ── Carrega billing completo (com company) para PDF ────────────────────────
   private async loadBillingFull(id: string): Promise<any> {
-    return this.prisma.billing.findUnique({
+    const billing = await this.prisma.billing.findUnique({
       where: { id },
       include: {
         company: { select: { legalName: true, tradeName: true, cnpj: true, ie: true, address: true, number: true, district: true, city: true, uf: true, zip: true, phone: true, email: true } },
         customer: { select: { id: true, name: true, email: true, accountantEmail: true, emailFinanceiro: true, document: true, ie: true, address: true, city: true, state: true, zip: true, phone: true } },
         receivables: {
-          include: { nfe: { select: { number: true, issuedAt: true, totalInvoice: true, totalProducts: true, items: { select: { kind: true, total: true } } } } },
+          include: { nfe: { select: { number: true, issuedAt: true, totalInvoice: true, totalProducts: true, items: { select: { kind: true, cfop: true, total: true } } } } },
           orderBy: { dueDate: 'asc' },
         },
       },
     })
+
+    if (!billing) return null
+
+    // Para receivables acumulados (dia15/dia20) nfeNumbers contém todos os números
+    // mas nfeId só aponta para a primeira NF. Busca todas pelo número para listá-las no PDF.
+    const allNums = new Set<number>()
+    for (const r of (billing as any).receivables) {
+      const raw: string = (r as any).nfeNumbers ?? ''
+      for (const s of raw.split(',').map((x: string) => x.trim()).filter(Boolean)) {
+        const n = parseInt(s, 10)
+        if (!isNaN(n)) allNums.add(n)
+      }
+    }
+
+    if (allNums.size > 0) {
+      const nfes = await (this.prisma as any).nfe.findMany({
+        where: { number: { in: [...allNums] }, tenantId: (billing as any).tenantId, companyId: (billing as any).companyId, status: { not: 'canceled' } },
+        select: { id: true, number: true, issuedAt: true, totalInvoice: true, totalProducts: true, items: { select: { kind: true, cfop: true, total: true } } },
+        orderBy: { number: 'asc' },
+      })
+      ;(billing as any).resolvedNfes = nfes
+    }
+
+    return billing
   }
 
   // ── Gera Buffer PDF da duplicata ─────────────────────────────────────────────
@@ -179,22 +203,23 @@ export class BillingService {
 
     const dueDate = billing.dueDate ?? billing.receivables?.[0]?.dueDate ?? new Date()
 
-    // NFs referenciadas
-    const nfs = billing.receivables
-      .filter((r: any) => r.nfe)
-      .map((r: any) => {
-        const nfe = r.nfe
-        // Valor de cobrança = soma dos itens PMO+INSUMO (se existirem), senão totalInvoice
-        const billableItems = (nfe.items ?? []).filter((it: any) => it.kind === 'PMO' || it.kind === 'INSUMO')
-        const billingVal = billableItems.length > 0
-          ? billableItems.reduce((acc: number, it: any) => acc + Number(it.total ?? 0), 0)
-          : Number(nfe.totalInvoice ?? nfe.totalProducts ?? r.amount)
-        return {
-          data: new Date(nfe.issuedAt).toLocaleDateString('pt-BR'),
-          numero: String(nfe.number ?? ''),
-          valor: billingVal,
-        }
-      })
+    // NFs referenciadas — usa lista resolvida por nfeNumbers quando disponível
+    // (cobre o caso de receivables acumulados dia15/dia20 que têm múltiplas NFs)
+    function nfeToRow(nfe: any, fallbackAmount?: number) {
+      // Usa o mesmo critério do calcBillingAmount: exclui CFOPs não-faturáveis (retorno/devolução)
+      const billableItems = (nfe.items ?? []).filter(
+        (it: any) => it.cfop && !NON_BILLING_CFOPS.includes(String(it.cfop))
+      )
+      const valor = billableItems.length > 0
+        ? billableItems.reduce((acc: number, it: any) => acc + Number(it.total ?? 0), 0)
+        : (fallbackAmount != null ? fallbackAmount : Number(nfe.totalInvoice ?? nfe.totalProducts ?? 0))
+      return { data: new Date(nfe.issuedAt).toLocaleDateString('pt-BR'), numero: String(nfe.number ?? ''), valor }
+    }
+
+    const resolvedNfes: any[] = (billing as any).resolvedNfes ?? []
+    const nfs = resolvedNfes.length > 0
+      ? resolvedNfes.map((nfe: any) => nfeToRow(nfe))
+      : billing.receivables.filter((r: any) => r.nfe).map((r: any) => nfeToRow(r.nfe, r.amount))
 
     return {
       faturaNumero: billing.billingNumber,
@@ -238,7 +263,7 @@ export class BillingService {
     const toList: string[] = []
     if ((customer as any).emailFinanceiro) toList.push((customer as any).emailFinanceiro)
     else if (customer.email) toList.push(customer.email)
-    if (OFFICE_EMAIL && !toList.includes(OFFICE_EMAIL)) toList.push(OFFICE_EMAIL)
+    if (BILLING_EMAIL && !toList.includes(BILLING_EMAIL)) toList.push(BILLING_EMAIL)
     if (!toList.length) throw new BadRequestException(`Cliente ${customer.name} não possui e-mail cadastrado para envio da fatura.`)
 
     const meses = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez']
@@ -293,19 +318,37 @@ export class BillingService {
     const billing = await this.prisma.billing.update({
       where: { id },
       data: { status: 'paid' as any, paidAt },
-      include: { customer: { select: { name: true } } },
+      include: { customer: { select: { name: true, emailFinanceiro: true } } },
     })
 
-    if (OFFICE_EMAIL) this.mail.sendMail({
-      to: OFFICE_EMAIL,
-      subject: `Fatura paga — ${billing.customer?.name ?? billing.customerId} — Fatura Nº ${billing.billingNumber}`,
-      html: `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6">
+    // Envia confirmação de pagamento com PDF para escritório e cliente
+    try {
+      const billingFull = await this.loadBillingFull(id)
+      const pdfBuffer = billingFull ? await buildBillingPdf(this.toBillingPdfData(billingFull)) : null
+      const toList: string[] = []
+      const emailFin = (billing.customer as any)?.emailFinanceiro
+      if (emailFin) toList.push(emailFin)
+      if (BILLING_EMAIL && !toList.includes(BILLING_EMAIL)) toList.push(BILLING_EMAIL)
+
+      if (toList.length) {
+        const mailOpts: any = {
+          to: toList,
+          subject: `Fatura paga — ${billing.customer?.name ?? billing.customerId} — Fatura Nº ${billing.billingNumber}`,
+          html: `<div style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6">
 <p>Olá,</p>
-<p>A fatura ${billing.billingNumber} foi paga.</p>
-<p>Grato!</p>
-<p><strong>Tapajós</strong></p>
+<p>A fatura ${billing.billingNumber} foi confirmada como paga.</p>
+<p>Segue em anexo o comprovante da fatura.</p>
+<p>Atenciosamente,<br><strong>Peletização Tapajós</strong></p>
 </div>`,
-    }).catch(() => {})
+        }
+        if (pdfBuffer) {
+          mailOpts.attachments = [{ filename: `duplicata-${billing.billingNumber}.pdf`, content: pdfBuffer, contentType: 'application/pdf' }]
+        }
+        await this.mail.sendMail(mailOpts)
+      }
+    } catch (e) {
+      this.logger.warn(`⚠️ Erro ao enviar e-mail de fatura paga: ${(e as any)?.message}`)
+    }
 
     return billing
   }

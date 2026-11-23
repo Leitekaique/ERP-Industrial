@@ -101,6 +101,14 @@ export class NfeEmitController {
     return this.nfeService.getNfe(id, q)
   }
 
+  @Put(':id/draft')
+  async saveDraft(
+    @Param('id') id: string,
+    @Body() dto: any,
+  ) {
+    return this.nfeService.saveDraftExtra(id, dto)
+  }
+
   @Post(':id/emit')
   async emitFromDraft(
     @Param('id') id: string,
@@ -186,6 +194,7 @@ export class NfeEmitController {
   }
 
   /** Dispara atualização manual via API IBPT para todas as empresas */
+  @Public()
   @Post('ibpt-rates/refresh')
   async refreshIbptRates() {
     await this.ibptService.updateAllCompanies()

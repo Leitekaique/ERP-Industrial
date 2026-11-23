@@ -5,6 +5,17 @@ import axios from 'axios'
 
 export { useEmpresasOrigem } from './useEmpresasOrigem'
 
+export function useSystemConfig() {
+  return useQuery({
+    queryKey: ['system-config'],
+    queryFn: async () => {
+      const res = await api.get('/health/config')
+      return res.data as { sefazEnv: string }
+    },
+    staleTime: Infinity,
+  })
+}
+
 
 // ============================================================
 // 🧩 PRODUCTS
@@ -158,6 +169,19 @@ export function useStockHistoryItem(params: { productId: string }) {
       return res.data
     },
     enabled: !!params.productId,
+  })
+}
+
+export function useLotMovements(lotId: string | undefined) {
+  return useQuery({
+    queryKey: ['lot-movements', lotId],
+    queryFn: async () => {
+      const res = await api.get(`/inventory/stock/lot/${lotId}/movements`, {
+        params: { tenantId: 'T-001', companyId: 'C-001' },
+      })
+      return res.data
+    },
+    enabled: !!lotId,
   })
 }
 
@@ -464,11 +488,12 @@ export type DashboardSummary = {
     totalVencido: number
     countVencido: number
   }
-  grafico: Array<{ label: string; mes: number; ano: number; total: number; porCliente: { customerId: string; total: number }[] }>
-  graficoQtd: Array<{ label: string; mes: number; ano: number; qtd: number }>
+  grafico: Array<{ label: string; mes: number; ano: number; total: number; projetado: number; porCliente: { customerId: string; total: number }[] }>
+  graficoQtd: Array<{ label: string; mes: number; ano: number; qtd: number; porCliente: { customerId: string; qtd: number }[] }>
   graficoFluxo: Array<{ label: string; mes: number; ano: number; entradas: number; saidas: number; saldo: number }>
   topClientes: Array<{ customerId: string | null; name: string; totalFaturado: number; totalNfs: number }>
   alertasBillings: Array<{ id: string; cliente: string; mes: number; ano: number; total: number; status: string }>
+  proximosTitulos?: Array<{ id: string; tipo: 'receber' | 'pagar'; data: string; valor: number; contraparte: string }>
   tabelaProducao?: Array<{ empresa: string; processo: string; qtd: number; unit: string }>
   ultimasTransacoes?: Array<{ tipo: 'entrada' | 'saida'; data: string; valor: number; contraparte: string }>
 }
@@ -725,6 +750,12 @@ export function useDeleteNfe() {
   return useMutation({
     mutationFn: async (id: string) => (await api.delete(`/nfe-emit/${id}`)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['nfe-list'] }),
+  })
+}
+
+export function useDeleteNfeImport() {
+  return useMutation({
+    mutationFn: async (id: string) => (await api.delete(`/nfe-import/${id}`)).data,
   })
 }
 

@@ -9,12 +9,19 @@ import { create } from 'xmlbuilder2'
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
-/** Formata data no padrão ISO 8601 com offset BRT (-03:00) */
+/** Formata data no padrão ISO 8601 com offset BRT (-03:00), sem milissegundos.
+ *  O schema TDateTimeUTC do SEFAZ exige HH:MM:SS±HH:MM — milissegundos causam cStat=225.
+ *  Usa America/Sao_Paulo via Intl.DateTimeFormat para evitar offset manual. */
 function dhEvento(d: Date = new Date()): string {
-  // Offset fixo BRT (-03:00) — SEFAZ SP exige offset explícito
-  const offset = -180 // BRT = UTC-3
-  const local = new Date(d.getTime() + offset * 60 * 1000)
-  return local.toISOString().replace('Z', '-03:00')
+  const fmt = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  })
+  // sv-SE produz "YYYY-MM-DD HH:MM:SS" — substituímos o espaço por T e adicionamos o offset
+  const local = fmt.format(d).replace(' ', 'T')
+  return `${local}-03:00`
 }
 
 /** Id do infEvento: "ID" + tpEvento(6) + chave(44) + nSeqEvento(02) */
@@ -31,6 +38,7 @@ export interface CancelEventParams {
   xJust: string              // justificativa (15–255 caracteres)
   tpAmb?: '1' | '2'         // 1=prod, 2=homolog (default: 2)
   nSeqEvento?: number        // sequência (default: 1)
+  cOrgao?: string            // código UF SEFAZ (default: SEFAZ_UF env ou '35' = SP)
 }
 
 export function buildCancelEventXml(params: CancelEventParams): string {
@@ -41,6 +49,7 @@ export function buildCancelEventXml(params: CancelEventParams): string {
     xJust,
     tpAmb = '2',
     nSeqEvento = 1,
+    cOrgao = process.env.SEFAZ_UF ?? '35',
   } = params
 
   const tpEvento = '110111'
@@ -55,7 +64,7 @@ export function buildCancelEventXml(params: CancelEventParams): string {
       .ele('idLote').txt('1').up()
       .ele('evento', { versao: '1.00' })
         .ele('infEvento', { Id: infId })
-          .ele('cOrgao').txt('91').up()        // 91 = SVAN (ambiente nacional)
+          .ele('cOrgao').txt(cOrgao).up()
           .ele('tpAmb').txt(tpAmb).up()
           .ele('CNPJ').txt(cnpjEmitente.replace(/\D/g, '')).up()
           .ele('chNFe').txt(chNFe).up()
@@ -77,8 +86,9 @@ export function buildCancelEventXml(params: CancelEventParams): string {
 
 // ─── CC-e ─────────────────────────────────────────────────────────────────────
 
+// Texto fixo exigido pelo schema leiauteCCe_v1.00.xsd (enumeração exata) — NT 2013.005
 const XCOND_USO =
-  'A Carta de Correção é disciplinada pelo § 1º-A do art. 7º do Convênio S/N, de 15 de dezembro de 1970 e pode ser utilizada para regularização de erro ocorrido na emissão de documento fiscal, desde que o erro não esteja relacionado com: I - as variáveis que determinam o valor do imposto tais como: base de cálculo, alíquota, diferença de preço, quantidade, valor da operação ou da prestação; II - a correção de dados cadastrais que implique mudança do remetente ou do destinatário; III - a data de emissão ou de saída.'
+  'A Carta de Correcao e disciplinada pelo paragrafo 1o-A do art. 7o do Convenio S/N, de 15 de dezembro de 1970 e pode ser utilizada para regularizacao de erro ocorrido na emissao de documento fiscal, desde que o erro nao esteja relacionado com: I - as variaveis que determinam o valor do imposto tais como: base de calculo, aliquota, diferenca de preco, quantidade, valor da operacao ou da prestacao; II - a correcao de dados cadastrais que implique mudanca do remetente ou do destinatario; III - a data de emissao ou de saida.'
 
 export interface CceEventParams {
   cnpjEmitente: string       // CNPJ do emitente sem formatação
@@ -86,6 +96,7 @@ export interface CceEventParams {
   xCorrecao: string          // texto da correção (15–1000 caracteres)
   tpAmb?: '1' | '2'
   nSeqEvento?: number        // 1..20
+  cOrgao?: string            // código UF SEFAZ (default: SEFAZ_UF env ou '35' = SP)
 }
 
 export function buildCceEventXml(params: CceEventParams): string {
@@ -95,6 +106,7 @@ export function buildCceEventXml(params: CceEventParams): string {
     xCorrecao,
     tpAmb = '2',
     nSeqEvento = 1,
+    cOrgao = process.env.SEFAZ_UF ?? '35',
   } = params
 
   const tpEvento = '110110'
@@ -109,15 +121,15 @@ export function buildCceEventXml(params: CceEventParams): string {
       .ele('idLote').txt('1').up()
       .ele('evento', { versao: '1.00' })
         .ele('infEvento', { Id: infId })
-          .ele('cOrgao').txt('91').up()
+          .ele('cOrgao').txt(cOrgao).up()
           .ele('tpAmb').txt(tpAmb).up()
           .ele('CNPJ').txt(cnpjEmitente.replace(/\D/g, '')).up()
           .ele('chNFe').txt(chNFe).up()
           .ele('dhEvento').txt(dh).up()
           .ele('tpEvento').txt(tpEvento).up()
           .ele('nSeqEvento').txt(String(nSeqEvento)).up()
-          .ele('verEvento').txt('1.01').up()
-          .ele('detEvento', { versao: '1.01' })
+          .ele('verEvento').txt('1.00').up()
+          .ele('detEvento', { versao: '1.00' })
             .ele('descEvento').txt('Carta de Correcao').up()  // texto fixo SEFAZ — sem acento
             .ele('xCorrecao').txt(xCorrecao).up()
             .ele('xCondUso').txt(XCOND_USO).up()
@@ -141,7 +153,12 @@ import { SignedXml } from 'xml-crypto'
 import * as fs from 'fs'
 import * as path from 'path'
 
-export function signEventXml(xml: string): string {
+/**
+ * Assina o XML do evento usando o certificado armazenado na empresa (certA1Keystore).
+ * Aceita certBuffer/certPassword diretamente para evitar leitura duplicada do BD.
+ * Mesmo padrão de assinatura e injeção de KeyInfo do signXml (xml-signer.ts).
+ */
+export function signEventXml(xml: string, certBuffer?: Buffer, certPassword?: string): string {
   const mode = getSefazEnv()
 
   if (mode === 'simulator') {
@@ -151,19 +168,20 @@ export function signEventXml(xml: string): string {
     )
   }
 
-  const certPath = process.env.CERT_PATH
-  const certPassword = process.env.CERT_PASSWORD ?? ''
-
-  if (!certPath || !fs.existsSync(certPath)) {
-    throw new Error('Certificado digital não configurado (CERT_PATH).')
+  // Fallback para arquivo local quando certBuffer não é fornecido (compatibilidade)
+  let buf = certBuffer
+  let pwd = certPassword ?? ''
+  if (!buf) {
+    const certPath = path.resolve('certs/tapajos-cert.pfx')
+    if (!fs.existsSync(certPath)) throw new Error('Certificado digital não encontrado.')
+    buf = fs.readFileSync(certPath)
+    pwd = process.env.CERT_PASSWORD ?? ''
   }
 
-  const certBuffer = fs.readFileSync(certPath)
-
   try {
-    const pfxDer = certBuffer.toString('binary')
+    const pfxDer = buf.toString('binary')
     const p12Asn1 = forge.asn1.fromDer(pfxDer, false)
-    const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, certPassword)
+    const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, pwd)
 
     const keyBags =
       p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[
@@ -181,10 +199,9 @@ export function signEventXml(xml: string): string {
     const certDer = forge.asn1.toDer(certAsn1).getBytes()
     const certBase64 = forge.util.encode64(certDer)
 
-    const sig = new SignedXml({
-      privateKey: privateKeyPem,
-      publicCert: `<X509Data><X509Certificate>${certBase64}</X509Certificate></X509Data>`,
-    } as any)
+    // Mesmo padrão do signXml: suprime KeyInfo automático, injeta manualmente após assinar
+    const sig = new SignedXml({ privateKey: privateKeyPem } as any)
+    ;(sig as any).getKeyInfo = () => ''
 
     sig.addReference({
       xpath: "//*[local-name()='infEvento']",
@@ -199,14 +216,17 @@ export function signEventXml(xml: string): string {
     sig.signatureAlgorithm = 'http://www.w3.org/2000/09/xmldsig#rsa-sha1'
 
     sig.computeSignature(xml, {
-      location: {
-        reference: "//*[local-name()='infEvento']",
-        action: 'after',
-      },
+      location: { reference: "//*[local-name()='infEvento']", action: 'after' },
       prefix: '',
     })
 
-    return sig.getSignedXml()
+    // Injeta KeyInfo com namespace explícito (obrigatório pelo SEFAZ)
+    const keyInfoBlock = `<KeyInfo xmlns="http://www.w3.org/2000/09/xmldsig#"><X509Data><X509Certificate>${certBase64}</X509Certificate></X509Data></KeyInfo>`
+    const signedXml = sig.getSignedXml()
+    if (signedXml.includes('<KeyInfo')) {
+      return signedXml.replace(/<KeyInfo[\s\S]*?<\/KeyInfo>/, keyInfoBlock)
+    }
+    return signedXml.replace('</SignatureValue>', `</SignatureValue>${keyInfoBlock}`)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     throw new Error(`Falha ao assinar evento XML: ${msg}`)

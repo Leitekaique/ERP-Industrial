@@ -3,6 +3,7 @@ import { useCreateReceivable, useReceivable, useCustomers } from '../../lib/useA
 import { useNavigate, useParams } from 'react-router-dom'
 import { FormField } from '../../components/FormField'
 import { PageHeader } from '../../components/ui/PageHeader'
+import { SearchableSelect } from '../../components/ui/SearchableSelect'
 
 export default function ReceivableForm() {
   const nav = useNavigate()
@@ -58,17 +59,17 @@ export default function ReceivableForm() {
         <div className="p-6 space-y-4">
 
           <FormField label="Cliente *">
-            <select
-              className="border rounded px-3 py-2 w-full"
+            <SearchableSelect
               value={customerId}
-              onChange={e => setCustomerId(e.target.value)}
-              required
-            >
-              <option value="">Selecione um cliente</option>
-              {customers?.map(c => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
+              onChange={setCustomerId}
+              placeholder="— Selecione —"
+              emptyLabel="— Selecione —"
+              options={(customers ?? []).map((c: any) => ({
+                value: c.id,
+                label: c.name,
+                sublabel: c.document ?? undefined,
+              }))}
+            />
           </FormField>
 
           <div className="grid grid-cols-2 gap-3">

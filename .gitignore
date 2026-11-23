@@ -69,3 +69,15 @@ limpar-nfe-hoje.sql
 
 # ── Logs de ferramentas externas ──────────────────────────────────────────────
 *robocopy-log.txt
+
+# Dumps do banco (dados reais de clientes) — nunca versionar
+backup_banco*.sql
+
+# Documentos internos com dados reais (clientes, preços, NFs) — ficam só na máquina
+versionamento.md
+docs/prints/
+docs/*.png
+docs/*.xlsx
+docs/restaurar_*
+docs/corrigir_cnpj_*
+docs/excluir_nf_*

@@ -45,6 +45,11 @@ export class StockOutDto extends BaseMoveDto {
   @IsString() productId!: string
   @IsNumber() @Min(0.000001) quantity!: number
 
+  // Quando informado: FIFO consome apenas lotes deste dono (evita consumir lotes de outra empresa)
+  @IsOptional()
+  @IsString()
+  empresaId?: string
+
   // Quando true: cria Receivable com preço × quantidade respeitando billingTerms do cliente
   @IsOptional()
   generateCharge?: boolean
@@ -55,4 +60,9 @@ export class StockTransferDto extends BaseMoveDto {
   @IsString() toWarehouseId!: string
   @IsString() productId!: string
   @IsNumber() @Min(0.000001) quantity!: number
+
+  // Quando informado: transfere apenas lotes deste dono
+  @IsOptional()
+  @IsString()
+  empresaId?: string
 }

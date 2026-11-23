@@ -17,6 +17,7 @@ import { PageHeader } from '../../components/ui/PageHeader'
 import { StatusBadge, BILLING_STATUS } from '../../components/ui/StatusBadge'
 import { EmptyState } from '../../components/ui/EmptyState'
 import { api } from '../../lib/api'
+import { SearchableSelect } from '../../components/ui/SearchableSelect'
 
 async function downloadBillingPdf(billingId: string, faturaNum: string | number) {
   try {
@@ -151,10 +152,14 @@ export default function BillingList() {
         </div>
         <div>
           <span className="block text-sm text-gray-600">Cliente</span>
-          <select className="border rounded px-2 py-2 w-64" value={customerId} onChange={e => setCustomerId(e.target.value)}>
-            <option value="">(Todos)</option>
-            {(customers ?? []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
+          <SearchableSelect
+            value={customerId}
+            onChange={setCustomerId}
+            placeholder="(Todos)"
+            emptyLabel="(Todos)"
+            className="w-64"
+            options={(customers ?? []).map(c => ({ value: c.id, label: c.name }))}
+          />
         </div>
         <div>
           <span className="block text-sm text-gray-600">Ano</span>
@@ -182,10 +187,14 @@ export default function BillingList() {
           <div className="grid grid-cols-3 gap-3">
             <div>
               <span className="block text-sm text-gray-600">Cliente</span>
-              <select className="border rounded px-2 py-2 w-full" value={genCustomerId} onChange={e => setGenCustomerId(e.target.value)}>
-                <option value="">Selecione...</option>
-                {(customers ?? []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
+              <SearchableSelect
+                value={genCustomerId}
+                onChange={setGenCustomerId}
+                placeholder="Selecione..."
+                emptyLabel="Selecione..."
+                className="w-full"
+                options={(customers ?? []).map(c => ({ value: c.id, label: c.name }))}
+              />
             </div>
             <div>
               <span className="block text-sm text-gray-600">Mês</span>

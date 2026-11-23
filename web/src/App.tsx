@@ -10,7 +10,7 @@ import NfeForm from './pages/nfe-emit/NfeForm'
 import { NfePreview } from './pages/nfe-emit/NFePreview'
 import NfeEmitFromStockPage from './pages/nfe-emit/NfeEmitFromStockPage'
 import NfeDraftDetailPage from './pages/nfe-emit/NfeDraftDetailPage'
-import NfeImportList from './pages/nfe-import/NFeImportList'
+import NfeImportList from './pages/nfe-import/NfeImportList'
 import ProductsList from './pages/products/ProductsList'
 import ProductForm from './pages/products/ProductForm'
 import ProcessesList from './pages/processes/ProcessesList'
@@ -25,12 +25,14 @@ import StockPage from './pages/inventory/StockPage'
 import StockMoveForm from './pages/inventory/StockMoveForm'
 import StockHistoryPage from './pages/inventory/StockHistoryPage'
 import StockHistoryListPage from './pages/inventory/StockHistoryListPage'
+import StockLotMovementsPage from './pages/inventory/StockLotMovementsPage'
 import SuppliersList from './pages/suppliers/SuppliersList'
 import SupplierForm from './pages/suppliers/SupplierForm'
 import TransporterList from './pages/transporter/TransporterList'
 import TransporterForm from './pages/transporter/TransporterForm'
 import WarehousesList from './pages/inventory/WarehousesList'
 import FinanceiroHistoricoPage from './pages/financeiro/FinanceiroHistoricoPage'
+import QaEmissaoPage from './pages/qa/QaEmissaoPage'
 
 export default function App() {
   return (
@@ -72,6 +74,7 @@ export default function App() {
             <Route path="/inventory/stock/move/:productId" element={<StockMoveForm />} />
             <Route path="/inventory/stock/move/new" element={<StockMoveForm />} />
             <Route path="/inventory/stock/:productId/history" element={<StockHistoryPage />} />
+            <Route path="/inventory/stock/lot/:lotId/movements" element={<StockLotMovementsPage />} />
             <Route path="/inventory/stock/history" element={<StockHistoryListPage />} />
 
             <Route path="/payables" element={<PayablesList />} />
@@ -84,6 +87,7 @@ export default function App() {
 
             <Route path="/billing" element={<BillingList />} />
             <Route path="/financeiro/historico" element={<FinanceiroHistoricoPage />} />
+            <Route path="/qa/emissao" element={<QaEmissaoPage />} />
 
             <Route path="/nfe/emit/from-stock" element={<NfeEmitFromStockPage />} />
             <Route path="/nfe-emit" element={<NfeList />} />

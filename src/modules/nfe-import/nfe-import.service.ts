@@ -164,12 +164,19 @@ private classifyNfe({
     cfops.filter(Boolean).map(c => c.toString())
   );
 
-  // 🔹 Remessa para industrialização
+  // 🔹 Remessa para industrialização / conserto / reparo / retorno de terceiro — por CFOP ou natOp
+  // 5949/6949: "outras saídas" usadas pelo cliente para devolver material a Tapajós
   if (
-	natOp.toUpperCase().includes('REMESSA') ||
-	natOp.toUpperCase().includes('INDUSTRIA')
+    ['5901', '6901', '1901', '2901', '5915', '6915', '1915', '2915', '5949', '6949'].some(c => cfopSet.has(c)) ||
+    natOp.toUpperCase().includes('REMESSA') ||
+    natOp.toUpperCase().includes('INDUSTRIA') ||
+    natOp.toUpperCase().includes('BENEFICIA') ||
+    natOp.toUpperCase().includes('ENCOMENDA') ||
+    natOp.toUpperCase().includes('CONSERT') ||
+    natOp.toUpperCase().includes('REPARO') ||
+    natOp.toUpperCase().includes('RETORNO')
   ) {
-	return 'REMESSA_IND';
+    return 'REMESSA_IND';
   }
 
   // 🔹 Triangulação / por conta e ordem
@@ -212,10 +219,12 @@ private classifyNfe({
     if (tipoNf === 'REMESSA_IND') {
       customer = await this.upsertCustomer(tenantId, companyId, emit)
     }
-	
-	if (tipoNf === 'TRIANGULACAO') {
-	  customer = await this.upsertCustomer(tenantId, companyId, emit);
-	}
+
+    if (tipoNf === 'TRIANGULACAO') {
+      // dest = cliente contratante (ex: Mesa Belém); emit = fornecedor entregador (ex: Três Elos)
+      customer = await this.upsertCustomer(tenantId, companyId, dest)
+      supplier = await this.upsertSupplier(tenantId, companyId, emit)
+    }
     return { supplier, customer }
   }
 
@@ -255,18 +264,20 @@ private classifyNfe({
   }
 
   private async upsertCustomer(tenantId: string, companyId: string, emit: any) {
+    // Aceita tanto o nó emit (enderEmit) quanto dest (enderDest)
+    const ender = emit?.enderEmit ?? emit?.enderDest ?? {}
     const nfData = {
       name: emit.xNome ?? null,
       ie: emit.IE ?? null,
       email: emit?.email ?? null,
-      phone: emit?.enderEmit?.fone ?? emit?.fone ?? null,
-      zip: emit?.enderEmit?.CEP ?? null,
-      address: emit?.enderEmit?.xLgr ?? null,
-      number: emit?.enderEmit?.nro ?? null,
-      district: emit?.enderEmit?.xBairro ?? null,
-      city: emit?.enderEmit?.xMun ?? null,
-      cityCode: emit?.enderEmit?.cMun ?? null,
-      state: emit?.enderEmit?.UF ?? null,
+      phone: ender?.fone ?? emit?.fone ?? null,
+      zip: ender?.CEP ?? null,
+      address: ender?.xLgr ?? null,
+      number: ender?.nro ?? null,
+      district: ender?.xBairro ?? null,
+      city: ender?.xMun ?? null,
+      cityCode: ender?.cMun ?? null,
+      state: ender?.UF ?? null,
     }
     return this.prisma.customer.upsert({
       where: { document: emit.CNPJ },
@@ -391,11 +402,10 @@ if (tipoNf === 'COMPRA_INSUMO') {
 } else {
   // PF (REMESSA_IND / TRIANGULACAO / OUTROS)
   const processoDefault =
-    tipoNf === 'REMESSA_IND'
-      ? 'Industrializacao'
-      : tipoNf === 'TRIANGULACAO'
-        ? 'Definir'
-        : 'Definir x'
+    (tipoNf === 'REMESSA_IND' || tipoNf === 'TRIANGULACAO') ? 'Industrializacao' : 'Definir'
+
+  // CFOP do produto físico: 5925 em triangulação (retorno simbólico), 5902 em remessa normal
+  const cfopFisico = tipoNf === 'TRIANGULACAO' ? '5925' : '5902'
 
   // unique: tenantId, companyId, sku, empresaId=empresaIdProduto (customer no seu contrato)
   produtoBase = await this.upsertProductWithImportRules({
@@ -417,8 +427,8 @@ if (tipoNf === 'COMPRA_INSUMO') {
       ncm: item.NCM ?? null,
       price: Number(item.vUnCom ?? 0),
 
-      cfop: '5902',
-      taxes: { csosn: '900', ...(cest ? { cest } : {}) },
+      cfop: cfopFisico,
+      taxes: { csosn: '400', ...(cest ? { cest } : {}) },
 
       // ✅ default só na criação
       processo: processoDefault,
@@ -431,8 +441,8 @@ if (tipoNf === 'COMPRA_INSUMO') {
       ncm: item.NCM ?? null,
       price: Number(item.vUnCom ?? 0),
 
-      cfop: '5902',
-      taxes: { csosn: '900', ...(cest ? { cest } : {}) },
+      cfop: cfopFisico,
+      taxes: { csosn: '400', ...(cest ? { cest } : {}) },
 
       processo: processoDefault, // será ignorado pelo protectFields
     },
@@ -448,7 +458,10 @@ if (tipoNf === 'COMPRA_INSUMO') {
  * 4️⃣ PRODUTO MO (SOMENTE REMESSA INDUSTRIALIZAÇÃO)
  * ===========================================================
  */
-if (tipoNf === 'REMESSA_IND') {
+if (tipoNf === 'REMESSA_IND' || tipoNf === 'TRIANGULACAO') {
+  // CFOP de MO: 5125 em triangulação, 5124 em remessa normal
+  const cfopMo = tipoNf === 'TRIANGULACAO' ? '5125' : '5124'
+
   await this.upsertProductWithImportRules({
     tenantId,
     companyId,
@@ -466,12 +479,11 @@ if (tipoNf === 'REMESSA_IND') {
       ncm: item.NCM ?? null,
       price: 0.70,
 
-      cfop: '5124',
+      cfop: cfopMo,
       taxes: { csosn: '400' },
       processo: 'Industrializacao',
     },
 
-    // você pode atualizar nome/ncm/cfop/taxes, mas não unit/processo/price (pra não sobrescrever edições)
     updateData: {
       name: `${item.xProd} - MO`,
       unit: produtoBase.unit,
@@ -479,7 +491,7 @@ if (tipoNf === 'REMESSA_IND') {
 
       price: 0.70,                  // protegido
       processo: 'Industrializacao',  // protegido
-      cfop: '5124',
+      cfop: cfopMo,
       taxes: { csosn: '400' },
     },
 
@@ -491,18 +503,7 @@ if (tipoNf === 'REMESSA_IND') {
 
   /**
    * ===========================================================
-   * 5️⃣ TRIANGULAÇÃO / POR CONTA E ORDEM
-   * ===========================================================
-   * - Produto existe
-   * - Estoque NÃO é movimentado
-   */
-  if (tipoNf === 'TRIANGULACAO') {
-    return;
-  }
-
-  /**
-   * ===========================================================
-   * 6️⃣ ESTOQUE (COMPRA DE INSUMO / REMESSA)
+   * 5️⃣ ESTOQUE (COMPRA DE INSUMO / REMESSA / TRIANGULAÇÃO)
    * ===========================================================
    */
 const warehouse = await this.prisma.warehouse.findFirst({
@@ -522,10 +523,10 @@ const lot = await this.prisma.stockLot.create({
     productId: produtoBase.id,
     warehouseId: warehouse.id,
     empresaId: empresaIdProduto,
-    processo: tipoNf === 'REMESSA_IND' ? 'Industrializacao' : 'Insumo',
+    processo: (tipoNf === 'REMESSA_IND' || tipoNf === 'TRIANGULACAO') ? 'Industrializacao' : 'Insumo',
     qtyInitial: Number(item.qCom),
     qtyRemaining: Number(item.qCom),
-    reference,
+    reference: nfEntrada ?? reference,
     occurredAt: dataEmissao,
     // se você tiver unit no lot/model, pode setar aqui:
     // unit: item.uCom ?? null,
@@ -611,13 +612,111 @@ await this.processHistoryService.record({
   return company.cnpj
 }
   // ===========================================================
-	// 📄 LISTAGEM DE NF IMPORTADAS
+  // 📄 LISTAGEM DE NF IMPORTADAS
   // ===========================================================
   async listNfes() {
-  return this.prisma.nfeImport.findMany({
-    orderBy: { createdAt: 'desc' },
-  });
-}
+    const nfes = await this.prisma.nfeImport.findMany({
+      orderBy: { createdAt: 'desc' },
+    })
+
+    if (nfes.length === 0) return []
+
+    // Coleta todas as referências possíveis para busca em lote de StockLots
+    const allRefs = new Set<string>()
+    for (const nf of nfes) {
+      if (nf.serie && nf.nfNumber) allRefs.add(`${nf.serie}-${nf.nfNumber}`)
+      if (nf.nfNumber) allRefs.add(nf.nfNumber)
+      if (nf.accessKey) allRefs.add(nf.accessKey)
+    }
+
+    const lots = await this.prisma.stockLot.findMany({
+      where: { reference: { in: [...allRefs] } },
+      select: { reference: true, qtyInitial: true, qtyRemaining: true },
+    })
+
+    const lotsByRef = new Map<string, { qtyInitial: any; qtyRemaining: any }[]>()
+    for (const lot of lots) {
+      if (!lot.reference) continue
+      const existing = lotsByRef.get(lot.reference) ?? []
+      existing.push(lot)
+      lotsByRef.set(lot.reference, existing)
+    }
+
+    return nfes.map(nf => {
+      const refs = [
+        nf.serie && nf.nfNumber ? `${nf.serie}-${nf.nfNumber}` : null,
+        nf.nfNumber,
+        nf.accessKey,
+      ].filter(Boolean) as string[]
+
+      let hasStockMoved = false
+      for (const ref of refs) {
+        const refLots = lotsByRef.get(ref) ?? []
+        for (const lot of refLots) {
+          if (Number(lot.qtyRemaining) < Number(lot.qtyInitial)) {
+            hasStockMoved = true
+            break
+          }
+        }
+        if (hasStockMoved) break
+      }
+
+      return { ...nf, canDelete: !hasStockMoved }
+    })
+  }
+
+  // ===========================================================
+  // 🗑️ EXCLUSÃO DE NF IMPORTADA
+  // ===========================================================
+  async deleteNfeImport(id: string) {
+    const nfImport = await this.prisma.nfeImport.findUnique({ where: { id } })
+    if (!nfImport) throw new BadRequestException('NF importada não encontrada.')
+
+    const refs = [
+      nfImport.serie && nfImport.nfNumber ? `${nfImport.serie}-${nfImport.nfNumber}` : null,
+      nfImport.nfNumber,
+      nfImport.accessKey,
+    ].filter(Boolean) as string[]
+
+    const lots = await this.prisma.stockLot.findMany({
+      where: { reference: { in: refs } },
+      select: { id: true, qtyInitial: true, qtyRemaining: true, productId: true, warehouseId: true },
+    })
+
+    const movedLot = lots.find(l => Number(l.qtyRemaining) < Number(l.qtyInitial))
+    if (movedLot) {
+      throw new BadRequestException(
+        'Não é possível excluir: produtos desta NF já foram movimentados no estoque.',
+      )
+    }
+
+    // Apaga movimentos de entrada vinculados a esta NF
+    const notePrefixes = refs.map(r => `Entrada via NF ${r}`)
+    await this.prisma.stockMovement.deleteMany({
+      where: {
+        note: { in: notePrefixes },
+        type: 'in' as any,
+      },
+    })
+
+    // Apaga os lotes de estoque
+    if (lots.length > 0) {
+      await this.prisma.stockLot.deleteMany({
+        where: { id: { in: lots.map(l => l.id) } },
+      })
+    }
+
+    // Apaga contas a pagar vinculadas
+    await this.prisma.payable.deleteMany({
+      where: { nfeReceivedId: id } as any,
+    })
+
+    // Apaga o registro da NF importada
+    await this.prisma.nfeImport.delete({ where: { id } })
+
+    this.logger.log(`🗑️ NF importada excluída: ${nfImport.nfNumber ?? nfImport.accessKey} (${id})`)
+    return { message: 'NF importada excluída com sucesso.' }
+  }
 // ✅ Coloque esse helper no final do NfeImportService (sessão AUX), como último private async.
 // Requer: import { ProcessHistoryType } from '@prisma/client'
 

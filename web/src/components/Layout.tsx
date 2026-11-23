@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../lib/auth'
+import { useSystemConfig } from '../lib/useApi'
 import {
   LayoutDashboard,
   Users,
@@ -19,6 +20,7 @@ import {
   Menu,
   ShoppingCart,
   X,
+  ClipboardCheck,
 } from 'lucide-react'
 
 // ─── Estrutura de navegação ───────────────────────────────────────────────────
@@ -48,8 +50,9 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: 'Fiscal',
     items: [
-      { to: '/nfe-emit',   icon: FileText, label: 'Emissão NF-e' },
-      { to: '/nfe-import', icon: FileText, label: 'NF-e Entrada', roles: ['ADMIN'] },
+      { to: '/nfe-emit',   icon: FileText,        label: 'Emissão NF-e' },
+      { to: '/nfe-import', icon: FileText,         label: 'NF-e Entrada', roles: ['ADMIN'] },
+      { to: '/qa/emissao', icon: ClipboardCheck,   label: 'QA Emissão',   roles: ['ADMIN'] },
     ],
   },
   {
@@ -103,6 +106,7 @@ export default function Layout() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
   const role = user?.role ?? 'MANAGER'
+  const { data: sysConfig } = useSystemConfig()
 
   const visibleGroups = NAV_GROUPS.map(g => ({
     ...g,
@@ -191,6 +195,7 @@ export default function Layout() {
             <LogOut size={16} />
             <span>Sair</span>
           </button>
+          <p className="mt-2 text-[9px] text-tapajos-700 select-none">v1.0.0</p>
         </div>
       </aside>
 
@@ -269,6 +274,7 @@ export default function Layout() {
               : <><ChevronLeft size={16} className="shrink-0" /><span>Recolher</span></>
             }
           </button>
+          {!collapsed && <p className="px-2 text-[9px] text-tapajos-700 select-none">v1.0.0</p>}
         </div>
       </aside>
 
@@ -291,6 +297,11 @@ export default function Layout() {
           {import.meta.env.DEV && (
             <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700 uppercase tracking-wide">
               Dev
+            </span>
+          )}
+          {sysConfig?.sefazEnv === 'homologacao' && (
+            <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-orange-100 text-orange-700 border border-orange-300 uppercase tracking-wide">
+              Homologação
             </span>
           )}
         </header>

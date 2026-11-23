@@ -1,6 +1,8 @@
 import {
   Controller,
   Post,
+  Delete,
+  Param,
   UploadedFile,
   UseInterceptors,
   BadRequestException,
@@ -17,9 +19,14 @@ import { DEFAULT_TENANT_ID, DEFAULT_COMPANY_ID } from '../../common/constants/te
 export class NfeImportController {
   constructor(private readonly nfeImportService: NfeImportService) {}
 
-@Get()
+  @Get()
   async list() {
     return this.nfeImportService.listNfes();
+  }
+
+  @Delete(':id')
+  async deleteImport(@Param('id') id: string) {
+    return this.nfeImportService.deleteNfeImport(id);
   }
 
   @Post('upload')

@@ -38,6 +38,15 @@ getHistory(
 }
 
 
+  @Get('lot/:lotId/movements')
+  getLotMovements(
+    @Param('lotId') lotId: string,
+    @Query('tenantId') tenantId: string,
+    @Query('companyId') companyId: string,
+  ) {
+    return this.stockService.getLotMovements({ lotId, tenantId, companyId })
+  }
+
 // E.1: Upload de foto do romaneio de entrada
   @Post('upload-receipt')
   @UseInterceptors(FileInterceptor('file', {
@@ -78,9 +87,8 @@ move(@Body() dto: any) {
   
   @Post('convert-unit')
   convertUnit(@Body() dto: StockConvertUnitDto) {
-	    console.log('DTO RECEBIDO:', dto)
-	return this.stockService.convertUnit(dto)
-}
+    return this.stockService.convertUnit(dto)
+  }
 
   @Get('warehouses')
   async listWarehouses(

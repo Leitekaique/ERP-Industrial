@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../../lib/api'
@@ -54,8 +54,6 @@ function sumQty(items: any) {
 
 export default function NfeList() {
   const navigate = useNavigate()
-  const [importing, setImporting] = useState(false)
-  const [importMsg, setImportMsg] = useState<{ text: string; ok: boolean } | null>(null)
   const deleteNfe = useDeleteNfe()
   const [cancelModal, setCancelModal] = useState<{ id: string; number: any } | null>(null)
   const [cceModal, setCceModal] = useState<{ id: string; number: any } | null>(null)
@@ -89,38 +87,6 @@ export default function NfeList() {
       (await api.get('/nfe-emit', { params: { tenantId, companyId } })).data,
   })
 
-  async function handleImportXml(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files ?? [])
-    if (!files.length) return
-    setImporting(true)
-    setImportMsg(null)
-    let ok = 0
-    const erros: string[] = []
-    for (const file of files) {
-      try {
-        const fd = new FormData()
-        fd.append('file', file)
-        fd.append('tenantId', tenantId)
-        fd.append('companyId', companyId)
-        await api.post('/nfe-emit/import-xml', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
-        ok++
-      } catch (err: any) {
-        const raw = err?.response?.data?.message ?? err?.message ?? 'Erro desconhecido'
-        const msg = Array.isArray(raw) ? raw.join(', ') : String(raw)
-        erros.push(`${file.name}: ${msg}`)
-      }
-    }
-    setImporting(false)
-    const resumo = ok > 0 ? `${ok} importada(s) com sucesso.` : ''
-    const detalheErros = erros.length > 0 ? erros.join('\n') : ''
-    setImportMsg({
-      text: [resumo, detalheErros].filter(Boolean).join('\n'),
-      ok: erros.length === 0,
-    })
-    e.target.value = ''
-    refetch()
-  }
-
   const filtered = useMemo(() => {
     let arr = Array.isArray(data) ? [...data] : []
     const q = search.toLowerCase()
@@ -145,6 +111,11 @@ export default function NfeList() {
 
   const sorted = useMemo(() => {
     return [...filtered].sort((a: any, b: any) => {
+      // Rascunhos sempre no topo
+      const aDraft = a?.status === 'draft' ? 0 : 1
+      const bDraft = b?.status === 'draft' ? 0 : 1
+      if (aDraft !== bDraft) return aDraft - bDraft
+
       let aVal: any, bVal: any
       if (sortKey === 'number') {
         aVal = Number(a?.number ?? 0); bVal = Number(b?.number ?? 0)
@@ -174,17 +145,6 @@ export default function NfeList() {
   return (
     <div className="space-y-4">
       <PageHeader title="Emissão NF-e" sub="Notas fiscais emitidas">
-        <label className={`px-3 py-2 border rounded text-sm bg-white cursor-pointer ${importing ? 'opacity-50 pointer-events-none' : ''}`}>
-          {importing ? 'Importando…' : 'Importar XML histórico'}
-          <input
-            type="file"
-            accept=".xml"
-            multiple
-            className="hidden"
-            onChange={handleImportXml}
-            disabled={importing}
-          />
-        </label>
         <button
           onClick={() => navigate('/nfe-emit/form')}
           className="px-3 py-2 bg-tapajos-600 text-white rounded text-sm hover:bg-tapajos-700"
@@ -192,11 +152,6 @@ export default function NfeList() {
           Nova NF-e
         </button>
       </PageHeader>
-      {importMsg && (
-        <div className={`px-4 py-2 rounded text-sm whitespace-pre-line ${importMsg.ok ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-amber-50 text-amber-700 border border-amber-200'}`}>
-          {importMsg.text}
-        </div>
-      )}
 
       {/* Filtros */}
       <div className="flex flex-wrap items-end gap-2">
@@ -217,6 +172,7 @@ export default function NfeList() {
             <option value="draft">Rascunho</option>
             <option value="authorized">Autorizada</option>
             <option value="canceled">Cancelada</option>
+            <option value="error">Erro</option>
           </select>
         </div>
         <div>
@@ -286,6 +242,7 @@ export default function NfeList() {
               const recipient = nfe?.customer?.name || nfe?.supplier?.name || nfe?.receiver || nfe?.destinatario || nfe?.receiver_name || '-'
               const status = String(nfe?.status ?? 'draft')
               const isDraft = status === 'draft'
+              const isError = status === 'error'
               const valorTotal = nfe?.totalInvoice ?? nfe?.totalProducts ?? nfe?.total_value ?? 0
               const valorCobranca = nfe?.billingAmount ?? null
               const dataCobranca = nfe?.issuedAt ?? nfe?.issue_date ?? nfe?.createdAt
@@ -330,6 +287,18 @@ export default function NfeList() {
                             Excluir
                           </button>
                         </>
+                      ) : isError ? (
+                        <button
+                          className="px-2 py-1 rounded text-xs font-medium bg-red-50 text-red-600 hover:bg-red-100 transition-colors"
+                          title="Excluir NF com erro"
+                          disabled={deleteNfe.isPending}
+                          onClick={async () => {
+                            if (!confirm(`Excluir NF ${number} (status: erro)?`)) return
+                            await deleteNfe.mutateAsync(nfe.id)
+                          }}
+                        >
+                          Excluir
+                        </button>
                       ) : (
                         <>
                           <button

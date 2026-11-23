@@ -1,6 +1,6 @@
 import { Injectable, BadRequestException, Logger } from '@nestjs/common'
 import { Decimal } from '@prisma/client/runtime/library'
-import { StockMovement, ProcessHistoryType } from '@prisma/client'
+import { ProcessHistoryType } from '@prisma/client'
 import { PrismaService } from '../../database/prisma.service'
 import { StockBalanceQueryDto } from './dto/stock-balance.dto'
 import { StockInDto, StockOutDto, StockTransferDto } from './dto/stock-move.dto'
@@ -32,45 +32,57 @@ export class StockService {
     const lots = await this.prisma.stockLot.findMany({
       where,
       include: {
-        product: {
-          include: {
-            company: true,
-            supplier: true,
-            customer: true,
-          },
-        },
+        product: true,
         warehouse: true,
       },
       orderBy: { occurredAt: 'asc' },
     })
 
+    // Resolve ownerLabel para qualquer empresaId (não só o supplier/customer do produto)
+    const allEmpresaIds = [...new Set(lots.map(l => l.empresaId).filter((id): id is string => !!id))]
+    const [suppliersRaw, customersRaw] = await Promise.all([
+      this.prisma.supplier.findMany({
+        where: { id: { in: allEmpresaIds } },
+        select: { id: true, name: true },
+      }),
+      this.prisma.customer.findMany({
+        where: { id: { in: allEmpresaIds } },
+        select: { id: true, name: true },
+      }),
+    ])
+    const supplierNames = new Map(suppliersRaw.map(s => [s.id, s.name]))
+    const customerNames = new Map(customersRaw.map(c => [c.id, c.name]))
+
     const result: any[] = []
 
     for (const lot of lots) {
-      if (Number(lot.qtyRemaining) <= 0) continue
-
-      const lastMovement = await this.prisma.stockMovement.findFirst({
-        where: {
-          tenantId: lot.tenantId,
-          companyId: lot.companyId,
-          productId: lot.productId,
-          warehouseId: lot.warehouseId,
-          occurredAt: { gte: lot.occurredAt },
-        },
-        orderBy: { occurredAt: 'desc' },
-      })
+      if (Number(lot.qtyRemaining) < 0.005) continue
 
       const p = lot.product
 
       let ownerLabel = 'Tapajós'
-      if (lot.empresaId === p.supplierId) {
-        ownerLabel = `Fornecedor: ${p.supplier?.name ?? '-'}`
-      } else if (lot.empresaId === p.customerId) {
-        ownerLabel = `Cliente: ${p.customer?.name ?? '-'}`
+      if (lot.empresaId && lot.empresaId !== q.companyId) {
+        if (supplierNames.has(lot.empresaId)) {
+          ownerLabel = `Fornecedor: ${supplierNames.get(lot.empresaId)}`
+        } else if (customerNames.has(lot.empresaId)) {
+          ownerLabel = `Cliente: ${customerNames.get(lot.empresaId)}`
+        }
       }
 
       const rawQty = Number(lot.qtyRemaining)
       const onHand = rawQty < 0.01 ? 0 : Number(rawQty.toFixed(2))
+      const qtyInitial = Number(lot.qtyInitial)
+
+      // Evento derivado do próprio lote — evita cruzamento entre lotes do mesmo produto/depósito
+      let evento: string
+      let dataEvento: Date
+      if (rawQty < qtyInitial) {
+        evento = rawQty <= 0.001 ? 'Saída total' : 'Saída parcial'
+        dataEvento = lot.createdAt ?? lot.occurredAt
+      } else {
+        evento = 'Entrada'
+        dataEvento = lot.occurredAt
+      }
 
       result.push({
         id: lot.id,
@@ -89,9 +101,9 @@ export class StockService {
         reference: lot.reference,
         dataNF: lot.occurredAt,
 
-        // 🔥 EVENTO REAL
-        evento: lastMovement ? this.mapEvento(lastMovement) : 'Entrada',
-        dataEvento: lastMovement?.occurredAt ?? lot.occurredAt,
+        // Estado derivado do lote (sem cruzamento entre lotes distintos)
+        evento,
+        dataEvento,
 
         // Depósito
         warehouseId: lot.warehouseId,
@@ -99,6 +111,7 @@ export class StockService {
 
         // Proprietário
         ownerLabel,
+        empresaId: lot.empresaId,
 
         // Quantidade
         onHand,
@@ -106,15 +119,6 @@ export class StockService {
     }
 
     return result
-  }
-
-  private mapEvento(m: StockMovement) {
-    if (m.note?.includes('CONVERSAO_UNIDADE')) {
-      return 'Conversão de unidade'
-    }
-    if (m.type === 'in') return 'Entrada'
-    if (m.type === 'out') return 'Saída'
-    return 'Movimentação'
   }
 
   // ===========================================================
@@ -154,7 +158,7 @@ async stockIn(dto: StockInDto) {
 
     if (!warehouse) throw new BadRequestException('Depósito inválido')
 
-    const qty = Number(dto.quantity)
+    const qty = Math.round(Number(dto.quantity) * 100) / 100
     if (!Number.isFinite(qty) || qty <= 0) {
       throw new BadRequestException('Quantidade inválida')
     }
@@ -184,13 +188,13 @@ async stockIn(dto: StockInDto) {
         productId: product.id,
         warehouseId: warehouse.id,
 
-        // ✅ sempre Company (Tapajós)
-        empresaId: product.empresaId,
+        // entrada manual sempre pertence à Tapajós (product.empresaId aponta pro fornecedor em insumos importados)
+        empresaId: dto.companyId,
 
         processo: product.processo ?? '-',
         unit: product.unit ?? null,
 
-        reference: null,
+        reference: (dto as any).reference ?? null,
         occurredAt: now, // usa a mesma data do movimento
         qtyInitial: qty,
         qtyRemaining: qty,
@@ -258,29 +262,29 @@ async stockOut(dto: StockOutDto) {
 
     if (!product) throw new BadRequestException('Produto não encontrado')
 
-    // Se sua regra exige processo para movimentar, mantém:
-    if (!product.processo) {
-      throw new BadRequestException('Produto sem processo definido')
+    const lotsWhere: any = {
+      tenantId: dto.tenantId,
+      companyId: dto.companyId,
+      productId: dto.productId,
+      warehouseId: dto.warehouseId,
+      qtyRemaining: { gt: 0.004 }, // ignora resíduos < 0.01
     }
+    const empresaFilter = dto.empresaId ?? (dto as any).empresaOrigemId
+    if (empresaFilter) lotsWhere.empresaId = empresaFilter
 
     const lots = await tx.stockLot.findMany({
-      where: {
-        tenantId: dto.tenantId,
-        companyId: dto.companyId,
-        productId: dto.productId,
-        warehouseId: dto.warehouseId,
-        qtyRemaining: { gt: 0 },
-      },
+      where: lotsWhere,
       orderBy: { occurredAt: 'asc' },
     })
 
-    let remaining = Number(dto.quantity)
+    // quantidade arredondada a 2 casas para evitar resíduos de ponto flutuante
+    let remaining = Math.round(Number(dto.quantity) * 100) / 100
     let firstLotUsed: (typeof lots)[number] | null = null
 
     for (const lot of lots) {
       if (remaining <= 0) break
 
-      const available = Number(lot.qtyRemaining)
+      const available = Math.round(Number(lot.qtyRemaining) * 100) / 100
       const consume = Math.min(available, remaining)
 
       if (!firstLotUsed && consume > 0) firstLotUsed = lot
@@ -293,10 +297,10 @@ async stockOut(dto: StockOutDto) {
         },
       })
 
-      remaining -= consume
+      remaining = Math.round((remaining - consume) * 100) / 100
     }
 
-    if (remaining > 0) {
+    if (remaining > 0.005) {
       throw new BadRequestException('Estoque insuficiente')
     }
 
@@ -416,61 +420,108 @@ private computeDueDateFromBillingTerms(issueDate: Date, billingTerms?: string | 
   // 🔁 TRANSFERÊNCIA
   // ===========================================================
   async transfer(dto: StockTransferDto) {
-    const pairId = randomUUID()
+    return this.prisma.$transaction(async (tx) => {
+      const pairId = randomUUID()
 
-    await this.stockOut({
-      tenantId: dto.tenantId,
-      companyId: dto.companyId,
-      warehouseId: dto.fromWarehouseId,
-      productId: dto.productId,
-      quantity: dto.quantity,
-      note: `TRANSFER_OUT → ${dto.toWarehouseId}`,
-    } as any)
+      const product = await tx.product.findFirst({
+        where: { id: dto.productId, tenantId: dto.tenantId, companyId: dto.companyId },
+        select: { processo: true, unit: true },
+      })
+      if (!product?.processo) throw new BadRequestException('Produto sem processo definido')
 
-    const movementIn = await this.prisma.stockMovement.create({
-      data: {
+      // Busca lotes FIFO de origem — filtra por empresaId se fornecido
+      const lotsWhere: any = {
         tenantId: dto.tenantId,
         companyId: dto.companyId,
-        warehouseId: dto.toWarehouseId,
+        warehouseId: dto.fromWarehouseId,
         productId: dto.productId,
-        type: 'in',
-        qty: dto.quantity,
-        pairId,
-        ownership: 'own',
-        occurredAt: new Date(),
-        note: `TRANSFER_IN ← ${dto.fromWarehouseId}`,
-      },
+        qtyRemaining: { gt: 0 },
+      }
+      if (dto.empresaId) lotsWhere.empresaId = dto.empresaId
+
+      const sourceLots = await tx.stockLot.findMany({
+        where: lotsWhere,
+        orderBy: { occurredAt: 'asc' },
+        select: { id: true, qtyRemaining: true, empresaId: true, processo: true, unit: true },
+      })
+
+      let remaining = Number(dto.quantity)
+
+      // Estrutura para rastrear quanto foi consumido de cada (empresaId, processo, unit)
+      const consumed = new Map<string, { empresaId: string; processo: string; unit: string | null; qty: number }>()
+
+      for (const lot of sourceLots) {
+        if (remaining <= 0) break
+        const consume = Math.min(Number(lot.qtyRemaining), remaining)
+        await tx.stockLot.update({
+          where: { id: lot.id },
+          data: { qtyRemaining: { decrement: consume } },
+        })
+        remaining -= consume
+
+        // Agrupa por empresaId+processo para criar lotes destino preservando donos
+        const key = `${lot.empresaId}|${lot.processo}|${lot.unit ?? ''}`
+        const existing = consumed.get(key)
+        if (existing) {
+          existing.qty += consume
+        } else {
+          consumed.set(key, { empresaId: lot.empresaId, processo: lot.processo, unit: lot.unit, qty: consume })
+        }
+      }
+
+      if (remaining > 0) throw new BadRequestException('Estoque insuficiente para transferência')
+
+      // Movimento de saída
+      await tx.stockMovement.create({
+        data: {
+          tenantId: dto.tenantId,
+          companyId: dto.companyId,
+          warehouseId: dto.fromWarehouseId,
+          productId: dto.productId,
+          type: 'out',
+          qty: dto.quantity,
+          ownership: 'own',
+          occurredAt: new Date(),
+          note: `TRANSFER_OUT → ${dto.toWarehouseId}`,
+        },
+      })
+
+      const movementIn = await tx.stockMovement.create({
+        data: {
+          tenantId: dto.tenantId,
+          companyId: dto.companyId,
+          warehouseId: dto.toWarehouseId,
+          productId: dto.productId,
+          type: 'in',
+          qty: dto.quantity,
+          pairId,
+          ownership: 'own',
+          occurredAt: new Date(),
+          note: `TRANSFER_IN ← ${dto.fromWarehouseId}`,
+        },
+      })
+
+      // Cria um lote destino por grupo (empresaId + processo) — preserva rastreabilidade
+      for (const { empresaId, processo, unit, qty } of consumed.values()) {
+        await tx.stockLot.create({
+          data: {
+            tenantId: dto.tenantId,
+            companyId: dto.companyId,
+            productId: dto.productId,
+            warehouseId: dto.toWarehouseId,
+            empresaId,
+            processo,
+            unit: unit ?? product.unit ?? null,
+            reference: null,
+            occurredAt: movementIn.occurredAt,
+            qtyInitial: qty,
+            qtyRemaining: qty,
+          },
+        })
+      }
+
+      return movementIn
     })
-
-    const product = await this.prisma.product.findFirst({
-      where: {
-        id: dto.productId,
-        tenantId: dto.tenantId,
-        companyId: dto.companyId,
-      },
-    })
-
-    if (!product?.processo) {
-      throw new BadRequestException('Produto sem processo definido')
-    }
-
-    await this.prisma.stockLot.create({
-      data: {
-        tenantId: dto.tenantId,
-        companyId: dto.companyId,
-        productId: dto.productId,
-        warehouseId: dto.toWarehouseId,
-        empresaId: dto.companyId,
-        processo: product.processo,
-        unit: product.unit ?? null,
-        reference: null,
-        occurredAt: movementIn.occurredAt,
-        qtyInitial: dto.quantity,
-        qtyRemaining: dto.quantity,
-      },
-    })
-
-    return movementIn
   }
   // ===========================================================
   // 🔁 CONVERSÃO DE UNIDADE (FIFO + novo lote)
@@ -482,17 +533,22 @@ private computeDueDateFromBillingTerms(issueDate: Date, billingTerms?: string | 
         throw new BadRequestException('Empresa destino não informada')
       if (!dto.unitDestino)
         throw new BadRequestException('Unidade destino não informada')
-      if (!dto.factor || dto.factor <= 0)
-        throw new BadRequestException('Fator inválido')
+      if (!dto.largura && (!dto.factor || dto.factor <= 0))
+        throw new BadRequestException('Informe fator ou largura')
+
+      const lotsWhere: any = {
+        tenantId: dto.tenantId,
+        companyId: dto.companyId,
+        productId: dto.productId,
+        warehouseId: dto.warehouseId,
+        qtyRemaining: { gt: 0 },
+      }
+      if ((dto as any).empresaOrigemId) {
+        lotsWhere.empresaId = (dto as any).empresaOrigemId
+      }
 
       const lots = await tx.stockLot.findMany({
-        where: {
-          tenantId: dto.tenantId,
-          companyId: dto.companyId,
-          productId: dto.productId,
-          warehouseId: dto.warehouseId,
-          qtyRemaining: { gt: 0 },
-        },
+        where: lotsWhere,
         orderBy: { occurredAt: 'asc' },
       })
 
@@ -510,32 +566,33 @@ private computeDueDateFromBillingTerms(issueDate: Date, billingTerms?: string | 
         },
       })
 
-      if (!product?.processo) {
-        throw new BadRequestException('Produto sem processo definido')
-      }
+      if (!product) throw new BadRequestException('Produto não encontrado')
 
       // unidades
       const unidadeOrigem = baseLot.unit ?? product.unit ?? null
       const unidadeDestino = dto.unitDestino
-      const factor = Number(dto.factor)
+      const factor = dto.largura
+        ? 1 / Number(dto.largura)
+        : Number(dto.factor ?? 1)
 
-      // consumir FIFO
-      let remaining = dto.quantity
+      // consumir FIFO — quantidade arredondada a 2 casas para evitar resíduos decimais
+      const qtyToConsume = Math.round(Number(dto.quantity) * 100) / 100
+      let remaining = qtyToConsume
 
       for (const lot of lots) {
         if (remaining <= 0) break
 
-        const consume = Math.min(Number(lot.qtyRemaining), remaining)
+        const consume = Math.min(Math.round(Number(lot.qtyRemaining) * 100) / 100, remaining)
 
         await tx.stockLot.update({
           where: { id: lot.id },
           data: { qtyRemaining: { decrement: consume } },
         })
 
-        remaining -= consume
+        remaining = Math.round((remaining - consume) * 100) / 100
       }
 
-      if (remaining > 0) {
+      if (remaining > 0.005) {
         throw new BadRequestException('Estoque insuficiente para conversão')
       }
 
@@ -554,7 +611,7 @@ private computeDueDateFromBillingTerms(issueDate: Date, billingTerms?: string | 
         },
       })
 
-      const quantidadeConvertida = Number(dto.quantity) * factor
+      const quantidadeConvertida = Math.round(Number(dto.quantity) * factor * 100) / 100
 
       // entrada convertida
       await tx.stockMovement.create({
@@ -571,18 +628,18 @@ private computeDueDateFromBillingTerms(issueDate: Date, billingTerms?: string | 
         },
       })
 
-      // novo lote convertido
+      // novo lote convertido — empresaId = empresa destino (não Tapajós)
       await tx.stockLot.create({
         data: {
           tenantId: dto.tenantId,
           companyId: dto.companyId,
           productId: product.id,
           warehouseId: dto.warehouseId,
-          empresaId: dto.companyId,
-          processo: product.processo,
+          empresaId: dto.empresaDestinoId,
+          processo: product.processo ?? 'Definir',
           unit: unidadeDestino,
           reference: baseLot.reference,
-          occurredAt: baseLot.occurredAt,
+          occurredAt: new Date(),
           qtyInitial: quantidadeConvertida,
           qtyRemaining: quantidadeConvertida,
         },
@@ -604,6 +661,7 @@ private computeDueDateFromBillingTerms(issueDate: Date, billingTerms?: string | 
           fromUnit: unidadeOrigem,
           toUnit: unidadeDestino,
           factor,
+          ...(dto.largura ? { largura: dto.largura } : {}),
           empresaDestinoId: dto.empresaDestinoId,
           warehouseId: dto.warehouseId,
           baseLotId: baseLot.id,
@@ -723,5 +781,48 @@ private async enrichHistory(history: any[]) {
     orderBy: { name: 'asc' },
   })
 }
+
+  // ===========================================================
+  // 📦 MOVIMENTOS POR LOTE (sem migration — filtra pelo note)
+  // ===========================================================
+  async getLotMovements(params: { lotId: string; tenantId: string; companyId: string }) {
+    const lot = await this.prisma.stockLot.findFirst({
+      where: { id: params.lotId, tenantId: params.tenantId, companyId: params.companyId },
+      include: { product: true, warehouse: true },
+    })
+    if (!lot) return { lot: null, movements: [] }
+
+    const movements = await this.prisma.stockMovement.findMany({
+      where: {
+        tenantId: params.tenantId,
+        companyId: params.companyId,
+        note: { contains: params.lotId },
+      },
+      orderBy: { occurredAt: 'asc' },
+    })
+
+    return {
+      lot: {
+        id: lot.id,
+        productName: lot.product.name,
+        sku: lot.product.sku,
+        processo: lot.processo,
+        unit: lot.unit ?? lot.product.unit,
+        warehouseName: lot.warehouse.name,
+        qtyInitial: Number(lot.qtyInitial),
+        qtyRemaining: Number(lot.qtyRemaining),
+        occurredAt: lot.occurredAt,
+        reference: lot.reference,
+      },
+      movements: movements.map(m => ({
+        id: m.id,
+        type: m.type,
+        qty: Number(m.qty),
+        note: m.note,
+        reference: m.reference,
+        occurredAt: m.occurredAt,
+      })),
+    }
+  }
 
 }

@@ -207,7 +207,7 @@ if (editing && !customer) {
             onChange={(e) => setForm({ ...form, emailFinanceiro: e.target.value })}
           />
         </FormField>
-        <FormField label="E-mail adicional 1">
+        <FormField label="E-mail adicional 1 (NF-e)" hint="Receberá cópia do XML e DANFE junto com o e-mail principal">
           <input
             className="border rounded px-3 py-2 w-full"
             value={form.emailAdicional1}
@@ -232,6 +232,7 @@ if (editing && !customer) {
         >
           <option value="dia15">Vencimento dia 15 do mês seguinte (acúmulo mensal)</option>
           <option value="dia20">Vencimento dia 20 do mês seguinte (acúmulo mensal)</option>
+          <option value="0d">À vista (vencimento na data de emissão)</option>
           <option value="7d">Vencimento em 7 dias após emissão</option>
           <option value="15d">Vencimento em 15 dias após emissão</option>
           <option value="28d">Vencimento em 28 dias após emissão</option>

@@ -3,6 +3,7 @@ import { useCreatePayable, useSuppliers, usePayable, usePayableCategories, useAd
 import { useNavigate, useParams } from 'react-router-dom'
 import { PageHeader } from '../../components/ui/PageHeader'
 import { api } from '../../lib/api'
+import { SearchableSelect } from '../../components/ui/SearchableSelect'
 
 export default function PayableForm() {
   const nav = useNavigate()
@@ -67,9 +68,17 @@ export default function PayableForm() {
 
           <label className="block">
             <span className="block text-sm font-medium text-gray-700 mb-1">Fornecedor <span className="text-red-500">*</span></span>
-            <select className="border rounded px-3 py-2 w-full" value={supplierId} onChange={e => setSupplierId(e.target.value)} required>
-              {(suppliers ?? []).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
+            <SearchableSelect
+              value={supplierId}
+              onChange={setSupplierId}
+              placeholder="— Selecione —"
+              emptyLabel="— Selecione —"
+              options={(suppliers ?? []).map((s: any) => ({
+                value: s.id,
+                label: s.name,
+                sublabel: s.document ?? s.cnpj ?? undefined,
+              }))}
+            />
           </label>
 
           <div className="grid grid-cols-2 gap-3">

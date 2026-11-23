@@ -1,7 +1,7 @@
 # ============================
 # 1) Builder
 # ============================
-FROM node:22-bullseye-slim AS builder
+FROM node:22-bookworm-slim AS builder
 
 WORKDIR /usr/src/app
 
@@ -19,13 +19,14 @@ RUN npx prisma generate --schema=./prisma/schema.prisma --no-hints
 
 # Copia o código e compila o NestJS
 COPY tsconfig*.json ./
+COPY nest-cli.json ./
 COPY src ./src
 RUN npm run build
 
 # ============================
 # 2) Runtime
 # ============================
-FROM node:22-bullseye-slim AS runtime
+FROM node:22-bookworm-slim AS runtime
 
 WORKDIR /usr/src/app
 

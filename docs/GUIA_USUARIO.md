@@ -733,6 +733,7 @@ Em caso de problema (formatação, pane no sistema):
 |-------|--------------|
 | `dia15` | Acumula o mês inteiro em um recebível com vencimento no dia 15 do mês seguinte |
 | `dia20` | Acumula o mês inteiro em um recebível com vencimento no dia 20 do mês seguinte |
+| `0d` | À vista — um recebível por NF, vencendo na própria data de emissão |
 | `7d` | Um recebível por NF, vence 7 dias após a emissão |
 | `15d` | Um recebível por NF, vence 15 dias após a emissão |
 | `28d` | Um recebível por NF, vence 28 dias após a emissão |

@@ -4,6 +4,7 @@ import { FormField } from '../../components/FormField'
 import { useCreateProcess, useUpdateProcess, useProcess } from '../../lib/useProcesses'
 import { useEmpresasOrigem } from '../../lib/useEmpresasOrigem'
 import { PageHeader } from '../../components/ui/PageHeader'
+import { SearchableSelect } from '../../components/ui/SearchableSelect'
 
 export default function ProcessForm() {
   const nav = useNavigate()
@@ -81,19 +82,16 @@ if (editing && !process) {
       <div className="p-6 space-y-3">
 
       <FormField label="Empresa">
-        <select
-          className="border rounded px-3 py-2 w-full"
+        <SearchableSelect
           value={empresaId}
-          onChange={(e) => setEmpresaId(e.target.value)}
-          required
-        >
-          <option value="">Selecione</option>
-          {empresas.map((e) => (
-            <option key={e.id} value={e.id}>
-              {e.name} ({e.tipo})
-            </option>
-          ))}
-        </select>
+          onChange={setEmpresaId}
+          placeholder="— Selecione —"
+          emptyLabel="— Selecione —"
+          options={(empresas as any[]).map((e: any) => ({
+            value: e.id,
+            label: `${e.name} (${e.tipo})`,
+          }))}
+        />
       </FormField>
 
       <FormField label="Nome do processo">

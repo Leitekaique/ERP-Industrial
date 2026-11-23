@@ -1,10 +1,11 @@
-import { useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useLocation } from 'react-router-dom'
 import { useCreateProduct, useProduct, useUpdateProduct } from '../../lib/useApi'
 import { useEffect, useState, useMemo } from 'react'
 import { FormField } from '../../components/FormField'
 import { useEmpresasOrigem } from '../../lib/useEmpresasOrigem'
 import { useProcessesLite } from '../../lib/useProcesses'
 import { api } from '../../lib/api'
+import { SearchableSelect } from '../../components/ui/SearchableSelect'
 
 
 export default function ProductForm() {
@@ -13,6 +14,8 @@ export default function ProductForm() {
 
   const nav = useNavigate()
   const { id } = useParams()
+  const location = useLocation()
+  const backState = (location.state as any) ?? {}
   const editing = !!id
 
   const { data: product, isLoading } = useProduct(id)
@@ -111,7 +114,7 @@ export default function ProductForm() {
     }
 
 
-    nav('/products')
+    nav('/products', { state: backState })
   }
 
   if (editing && isLoading) return <p>Carregando...</p>
@@ -155,33 +158,30 @@ const priceReadonly = hasPMO
       </FormField>
 
       <FormField label="Empresa (origem)">
-        <select
-          className="border rounded px-3 py-2 w-full"
+        <SearchableSelect
           value={empresaId}
-          onChange={e => setEmpresaId(e.target.value)}
-        >
-          <option value="">Selecionar</option>
-          {empresas.map(e => (
-            <option key={e.id} value={e.id}>
-              {e.name} ({e.tipo})
-            </option>
-          ))}
-        </select>
+          onChange={setEmpresaId}
+          placeholder="— Selecionar —"
+          emptyLabel="— Selecionar —"
+          options={empresas.map((e: any) => ({
+            value: e.id,
+            label: `${e.name} (${e.tipo})`,
+          }))}
+        />
       </FormField>
 
       <FormField label="Processo">
-        <select
-          className="border rounded px-3 py-2 w-full"
+        <SearchableSelect
           value={processId ?? ''}
-          onChange={e => setProcessId(e.target.value || undefined)}
-        >
-          <option value="">Nenhum</option>
-          {processos.map(p => (
-            <option key={p.id} value={p.id}>
-              {p.name} — R$ {Number(p.price).toFixed(2)}/{p.unit}
-            </option>
-          ))}
-        </select>
+          onChange={v => setProcessId(v || undefined)}
+          placeholder="Nenhum"
+          emptyLabel="Nenhum"
+          options={processos.map((p: any) => ({
+            value: p.id,
+            label: p.name,
+            sublabel: `R$ ${Number(p.price).toFixed(2)}/${p.unit}`,
+          }))}
+        />
       </FormField>
 <FormField label="Unidade">
   <select

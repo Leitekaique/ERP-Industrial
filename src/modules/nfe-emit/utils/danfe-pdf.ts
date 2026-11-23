@@ -102,13 +102,13 @@ const R = (n: number) => n.toLocaleString('pt-BR', { minimumFractionDigits: 2, m
 function fmtDate(d: any): string {
   if (!d) return '-'
   const dt = new Date(d)
-  return isNaN(dt.getTime()) ? '-' : dt.toLocaleDateString('pt-BR')
+  return isNaN(dt.getTime()) ? '-' : dt.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })
 }
 
 function fmtHour(d: any): string {
   if (!d) return '-'
   const dt = new Date(d)
-  return isNaN(dt.getTime()) ? '-' : dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return isNaN(dt.getTime()) ? '-' : dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'America/Sao_Paulo' })
 }
 
 function fmtCnpj(s: string): string {
@@ -132,6 +132,7 @@ function getLogoPath(): string | null {
   const candidates = [
     path.join(process.cwd(), 'src/modules/nfe-emit/utils/logo.png'),
     path.join(__dirname, 'logo.png'),
+    path.join(process.cwd(), 'uploads/logo.png'),  // fallback: volume Docker persistente
     path.join(__dirname, '../../../..', 'logo.png'),
     path.join(process.cwd(), 'logo.png'),
   ]
@@ -367,7 +368,7 @@ export async function buildDanfePdf(d: DanfeData): Promise<Buffer> {
     const logoAreaW = emitW - 12
 
     // 1. Nome completo no topo
-    doc.fontSize(10).font('Helvetica-Bold').fillColor('#000')
+    doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#000')
       .text(d.emitNome, ML + 3, y + 3, { width: emitW - 6, align: 'center', lineBreak: false })
 
     // 2. Logo centralizado na área do meio
@@ -414,7 +415,7 @@ export async function buildDanfePdf(d: DanfeData): Promise<Buffer> {
     //   [box 2] "CHAVE DE ACESSO" + números formatados
     //   [box 3] texto consulta — espaço restante
     const chaveX = ML + emitW + danfeW
-    const barcodeBoxH = Math.round(hdrH / 3)
+    const barcodeBoxH = Math.round(hdrH * 0.46)
     const chaveNumH = Math.round(hdrH / 3)
     const consultaH = hdrH - barcodeBoxH - chaveNumH
 
@@ -428,12 +429,16 @@ export async function buildDanfePdf(d: DanfeData): Promise<Buffer> {
     drawBox(doc, chaveX, y + barcodeBoxH, chaveW, chaveNumH)
     doc.fontSize(5.5).font('Helvetica').fillColor('#000')
       .text('CHAVE DE ACESSO', chaveX + 3, y + barcodeBoxH + 2, { width: chaveW - 6, lineBreak: false })
-    doc.fontSize(7).font('Helvetica-Bold').fillColor('#000')
-      .text(chaveFormatted(d.chaveAcesso), chaveX + 3, y + barcodeBoxH + 9, { width: chaveW - 6, align: 'center' })
+    const _chY1 = y + barcodeBoxH + 11
+    doc.save()
+    doc.transform(1, 0, 0, 1.4, 0, _chY1 * (1 - 1.4))
+    doc.fontSize(8).font('Helvetica-Bold').fillColor('#000')
+      .text(chaveFormatted(d.chaveAcesso), chaveX + 3, _chY1, { width: chaveW - 6, align: 'center', lineBreak: false })
+    doc.restore()
 
     // Box 3: consulta — ocupa espaço restante
     drawBox(doc, chaveX, y + barcodeBoxH + chaveNumH, chaveW, consultaH)
-    doc.fontSize(5.5).font('Helvetica').fillColor('#000')
+    doc.fontSize(6.5).font('Helvetica').fillColor('#000')
       .text('Consulta de autenticidade no portal nacional da NF-e\nwww.nfe.fazenda.gov.br/portal ou no site da Sefaz autorizadora',
         chaveX + 3, y + barcodeBoxH + chaveNumH + 2, { width: chaveW - 6, align: 'center' })
 
@@ -688,14 +693,14 @@ export async function buildDanfePdf(d: DanfeData): Promise<Buffer> {
         const bottomLines = d.infoAdicBottom.trim().split('\n')
         const lineH = 8
         const totalH = bottomLines.length * lineH
-        const anchorY = daBoxY + daH_c - totalH - 4
+        const anchorY = daBoxY + daH_c - totalH - 2
         doc.fontSize(6.5).font('Helvetica').fillColor('#000')
-          .text(d.infoAdicBottom, ML + 3, anchorY, { width: infW - 6, lineBreak: true })
+          .text(d.infoAdicBottom, ML + 3, anchorY, { width: infW - 2, lineBreak: true })
       }
       doc.fontSize(6).font('Helvetica').fillColor('#555')
         .text(
           `Gerado por Tapajós ERP   |   DATA E HORA DA IMPRESSÃO: ${new Date().toLocaleString('pt-BR')}`,
-          ML, footY, { width: CW, align: 'center', lineBreak: false }
+          ML, footY + 2, { width: CW, align: 'center', lineBreak: false }
         )
     }
 
@@ -715,7 +720,7 @@ export async function buildDanfePdf(d: DanfeData): Promise<Buffer> {
       const addrH2 = 30
       const logoAreaH2 = hdrH - nameH2 - addrH2
       const logoAreaW2 = emitW - 12
-      doc.fontSize(10).font('Helvetica-Bold').fillColor('#000')
+      doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#000')
         .text(d.emitNome, ML + 3, cy + 3, { width: emitW - 6, align: 'center', lineBreak: false })
       if (logoPath) {
         try { doc.image(logoPath, ML + 6, cy + nameH2, { fit: [logoAreaW2, logoAreaH2], align: 'center', valign: 'center' }) } catch { /* skip */ }
@@ -750,7 +755,7 @@ export async function buildDanfePdf(d: DanfeData): Promise<Buffer> {
       // ── Chave de acesso block ─────────────────────────────────────────────────
       // Mesmo layout da página 1: 3 boxes dividindo hdrH igualmente
       const chaveX2 = ML + emitW + danfeW
-      const barcodeBoxH2 = Math.round(hdrH / 3)
+      const barcodeBoxH2 = Math.round(hdrH * 0.46)
       const chaveNumH2 = Math.round(hdrH / 3)
       const consultaH2 = hdrH - barcodeBoxH2 - chaveNumH2
       // Box 1: barcode
@@ -762,11 +767,15 @@ export async function buildDanfePdf(d: DanfeData): Promise<Buffer> {
       drawBox(doc, chaveX2, cy + barcodeBoxH2, chaveW, chaveNumH2)
       doc.fontSize(5.5).font('Helvetica').fillColor('#000')
         .text('CHAVE DE ACESSO', chaveX2 + 3, cy + barcodeBoxH2 + 2, { width: chaveW - 6, lineBreak: false })
-      doc.fontSize(7).font('Helvetica-Bold').fillColor('#000')
-        .text(chaveFormatted(d.chaveAcesso), chaveX2 + 3, cy + barcodeBoxH2 + 9, { width: chaveW - 6, align: 'center' })
+      const _chY2 = cy + barcodeBoxH2 + 9
+      doc.save()
+      doc.transform(1, 0, 0, 1.4, 0, _chY2 * (1 - 1.4))
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#000')
+        .text(chaveFormatted(d.chaveAcesso), chaveX2 + 3, _chY2, { width: chaveW - 6, align: 'center', lineBreak: false })
+      doc.restore()
       // Box 3: consulta
       drawBox(doc, chaveX2, cy + barcodeBoxH2 + chaveNumH2, chaveW, consultaH2)
-      doc.fontSize(5.5).font('Helvetica').fillColor('#000')
+      doc.fontSize(6.5).font('Helvetica').fillColor('#000')
         .text('Consulta de autenticidade no portal nacional da NF-e\nwww.nfe.fazenda.gov.br/portal ou no site da Sefaz autorizadora',
           chaveX2 + 3, cy + barcodeBoxH2 + chaveNumH2 + 2, { width: chaveW - 6, align: 'center' })
       cy += hdrH

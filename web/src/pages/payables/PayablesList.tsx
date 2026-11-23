@@ -4,6 +4,7 @@ import { useAddPayablePayment, useCancelPayable, usePayable, usePayables, useSup
 import { PageHeader } from '../../components/ui/PageHeader'
 import { StatusBadge, PAYABLE_STATUS } from '../../components/ui/StatusBadge'
 import { EmptyState } from '../../components/ui/EmptyState'
+import { SearchableSelect } from '../../components/ui/SearchableSelect'
 
 type SortKey = 'vencimento' | 'fornecedor' | 'valor' | 'categoria' | 'status'
 type SortDir = 'asc' | 'desc'
@@ -129,10 +130,14 @@ export default function PayablesList() {
 
         <div>
           <span className="block text-sm text-gray-600">Fornecedor</span>
-          <select className="border rounded px-2 py-2 w-72" value={supplierId} onChange={e=>setSupplierId(e.target.value)}>
-            <option value="">(Todos)</option>
-            {(suppliers ?? []).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+          <SearchableSelect
+            value={supplierId}
+            onChange={setSupplierId}
+            placeholder="(Todos)"
+            emptyLabel="(Todos)"
+            className="w-72"
+            options={(suppliers ?? []).map(s => ({ value: s.id, label: s.name, sublabel: (s as any).document ?? (s as any).cnpj ?? undefined }))}
+          />
         </div>
 
         <div>
@@ -226,7 +231,7 @@ export default function PayablesList() {
                       <button className="text-xs text-emerald-600 hover:text-emerald-800 font-medium" onClick={() => setPayingId(p.id)}>Pagar</button>
                       <button
                         className="text-xs text-red-500 hover:text-red-700 font-medium"
-                        onClick={async () => { await cancelPayable.mutateAsync(p.id) }}
+                        onClick={async () => { if (!confirm('Confirma o cancelamento?')) return; await cancelPayable.mutateAsync(p.id) }}
                       >
                         Cancelar
                       </button>

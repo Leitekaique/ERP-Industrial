@@ -3,6 +3,10 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { api } from '../../lib/api'
 import { useTransportersList } from '../../lib/useApi'
+import { SearchableSelect } from '../../components/ui/SearchableSelect'
+
+const RETORNO_CFOPS = new Set(['5209', '6209', '5902', '6902', '5903', '6903', '5916', '6916', '5949', '6949', '5925', '6925'])
+const isRetornoCfop = (cfop: any) => RETORNO_CFOPS.has(String(cfop ?? ''))
 
 function toPtMoney(v: any) {
   const n = Number(v ?? 0)
@@ -86,6 +90,7 @@ function ReadonlyField({ label, value }: { label: string; value?: string | null 
 const BILLING_TERMS_LABEL: Record<string, string> = {
   dia15: 'Acumulado — vence dia 15 do mês seguinte',
   dia20: 'Acumulado — vence dia 20 do mês seguinte',
+  '0d':  'Por NF — à vista',
   '7d':  'Por NF — 7 dias',
   '15d': 'Por NF — 15 dias',
   '28d': 'Por NF — 28 dias',
@@ -106,6 +111,13 @@ export default function NfeDraftDetailPage() {
     queryFn: async () =>
       (await api.get(`/nfe-emit/${id}`, { params: { tenantId, companyId } })).data,
     enabled: !!id,
+  })
+
+  const { data: ibptRates } = useQuery({
+    queryKey: ['ibpt-rates', companyId],
+    queryFn: async () =>
+      (await api.get('/nfe-emit/ibpt-rates', { params: { companyId } })).data as { federalPct: number; estadualPct: number },
+    staleTime: 60 * 60 * 1000, // 1h — alíquotas mudam semanalmente
   })
 
   // a46 — próximo número da NF (exibido no header quando ainda é draft)
@@ -157,7 +169,10 @@ export default function NfeDraftDetailPage() {
     }
 
     const billingTerms = nfe?.customer?.billingTerms ?? null
-    const totalNF = Number(nfe?.totalInvoice ?? nfe?.totalProducts ?? 0)
+    // Valor de cobrança = apenas itens faturáveis (exclui CFOPs de retorno 5902/5903 que são devolução de material)
+    const billableItems = (nfe?.items ?? []).filter((it: any) => !isRetornoCfop(it?.cfop))
+    const totalBillable = billableItems.reduce((acc: number, it: any) =>
+      acc + Number(it?.total ?? (Number(it?.qty ?? 0) * Number(it?.unitPrice ?? 0))), 0)
 
     setDraftExtra(prev => ({
       ...prev,
@@ -172,7 +187,8 @@ export default function NfeDraftDetailPage() {
       weightGross: nfe?.weightGross != null ? fmtDecimalInput(Number(nfe.weightGross), 3) : prev.weightGross,
       cobrancaNumero: nfe?.number ? String(nfe.number).padStart(3, '0') : '001',
       cobrancaVencimento: computeDueDate(billingTerms),
-      cobrancaValor: totalNF > 0 ? fmtDecimalInput(totalNF) : prev.cobrancaValor,
+      cobrancaValor: totalBillable > 0 ? fmtDecimalInput(totalBillable) : prev.cobrancaValor,
+      informacoesAdicionais: (nfe as any)?.informacoesAdicionais ?? prev.informacoesAdicionais,
     }))
   }, [nfe])
 
@@ -181,7 +197,7 @@ export default function NfeDraftDetailPage() {
     if (!nfe) return
     const freteVal = parseDecimal(draftExtra.freteValor)
     if (freteVal <= 0) return
-    const items: any[] = nfe.items ?? []
+    const items: any[] = (nfe.items ?? []).filter((it: any) => !isRetornoCfop(it?.cfop))
     const itemsTotal = items.reduce((acc: number, it: any) =>
       acc + Number(it?.total ?? (Number(it?.qty ?? 0) * Number(it?.unitPrice ?? 0) - Number(it?.discount ?? 0))), 0)
     setDraftExtra(prev => ({ ...prev, cobrancaValor: fmtDecimalInput(itemsTotal + freteVal) }))
@@ -193,14 +209,19 @@ export default function NfeDraftDetailPage() {
   const emitMutation = useMutation({
     mutationFn: async () => {
       setEmitError(null)
+      const receiver = (nfe as any)?.customer ?? (nfe as any)?.supplier
       const selectedTransporter = transporters.find((t: any) => t.id === transportadoraId)
+      const transportadoraExtra =
+        transportadoraId === 'proprio' && receiver
+          ? { transportadoraNome: receiver.name, transportadoraCnpj: receiver.document }
+          : selectedTransporter
+            ? { transportadoraNome: selectedTransporter.name, transportadoraCnpj: selectedTransporter.cnpj }
+            : {}
       const res = await api.post(`/nfe-emit/${id}/emit`, {
         tenantId,
         companyId,
         ...(naturezaOperacao.trim() ? { naturezaOperacao: naturezaOperacao.trim() } : {}),
-        ...(selectedTransporter
-          ? { transportadoraNome: selectedTransporter.name, transportadoraCnpj: selectedTransporter.cnpj }
-          : {}),
+        ...transportadoraExtra,
         ...(draftExtra.freightType ? { freightType: draftExtra.freightType } : {}),
         ...(draftExtra.vehiclePlate ? { vehiclePlate: draftExtra.vehiclePlate } : {}),
         ...(draftExtra.vehicleUf ? { vehicleUf: draftExtra.vehicleUf } : {}),
@@ -224,6 +245,10 @@ export default function NfeDraftDetailPage() {
     onSuccess: (data: any) => {
       if (data?.status === 'authorized' || data?.cStat === 'SIMULADO') {
         setEmitSuccess({ nfeNum: data?.number })
+        if (data?.status === 'authorized') {
+          const base = import.meta.env.VITE_API_URL || 'http://localhost:3000'
+          window.open(`${base}/nfe-emit/${id}/danfe?tenantId=${tenantId}&companyId=${companyId}`, '_blank')
+        }
         setTimeout(() => nav('/nfe-emit'), 3500)
       } else {
         const cStat = data?.cStat ?? '?'
@@ -258,25 +283,37 @@ export default function NfeDraftDetailPage() {
     const items: any[] = nfe?.items ?? []
     const freteVal = parseDecimal(draftExtra.freteValor)
 
-    // a57 — separar totais por CFOP: 5902 = produto físico; demais = serviço/insumo
+    // a57 — separar totais por CFOP: retorno (5902/5903) = produto físico; demais = serviço/insumo
     const lineTotal = (it: any) =>
       Number(it?.total ?? (Number(it?.qty ?? 0) * Number(it?.unitPrice ?? 0) - Number(it?.discount ?? 0)))
 
     const total5902 = items
-      .filter((it: any) => String(it?.cfop) === '5902')
+      .filter((it: any) => isRetornoCfop(it?.cfop))
       .reduce((acc: number, it: any) => acc + lineTotal(it), 0)
 
     const totalServicosInsumos = items
-      .filter((it: any) => String(it?.cfop) !== '5902')
+      .filter((it: any) => !isRetornoCfop(it?.cfop))
       .reduce((acc: number, it: any) => acc + lineTotal(it), 0)
 
     const totalNF = total5902 + totalServicosInsumos + freteVal
-    const qtd = sumQty(items)
-    // Tributos aproximados IBPT — aplica-se apenas a itens faturáveis (exclui CFOP 5902)
-    const IBPT_PCT = 31.45 // federal 13,45% + estadual 18,00%
-    const tribApprox = totalServicosInsumos * IBPT_PCT / 100
-    return { total5902, totalServicosInsumos, freteVal, totalNF, qtd, tribApprox }
-  }, [nfe, draftExtra.freteValor])
+
+    // Qtd relevante: retorno 5902/5903 ou 5101/6101 (venda), fallback todos
+    const cfop5902Items = items.filter((it: any) => isRetornoCfop(it?.cfop))
+    const cfop5101Items = items.filter((it: any) => ['5101', '6101'].includes(String(it?.cfop)))
+    const qtd = cfop5902Items.length > 0
+      ? sumQty(cfop5902Items)
+      : cfop5101Items.length > 0
+      ? sumQty(cfop5101Items)
+      : sumQty(items)
+    const retornoCfopLabel = cfop5902Items.length > 0
+      ? [...new Set(cfop5902Items.map((it: any) => String(it?.cfop)))].join('/')
+      : null
+    const qtdCfopLabel = retornoCfopLabel ?? (cfop5101Items.length > 0 ? '5101/6101' : null)
+    // Tributos aproximados IBPT — aplica-se apenas a itens faturáveis (exclui retorno 5902/5903)
+    const ibptPct = (ibptRates?.federalPct ?? 13.45) + (ibptRates?.estadualPct ?? 18.0)
+    const tribApprox = totalServicosInsumos * ibptPct / 100
+    return { total5902, totalServicosInsumos, freteVal, totalNF, qtd, qtdCfopLabel, tribApprox, ibptPct }
+  }, [nfe, draftExtra.freteValor, ibptRates])
 
   if (isLoading) {
     return <div className="p-6 text-sm text-gray-600">Carregando rascunho…</div>
@@ -330,11 +367,35 @@ export default function NfeDraftDetailPage() {
           </button>
           <button
             className="px-3 py-2 border rounded text-sm bg-white hover:bg-gray-50"
-            onClick={() => {
+            onClick={async () => {
+              const receiver = (nfe as any)?.customer ?? (nfe as any)?.supplier
+              const selectedTransporter = transporters.find((t: any) => t.id === transportadoraId)
+              const transportadoraExtra =
+                transportadoraId === 'proprio' && receiver
+                  ? { transportadoraNome: receiver.name, transportadoraCnpj: receiver.document }
+                  : selectedTransporter
+                    ? { transportadoraNome: selectedTransporter.name, transportadoraCnpj: selectedTransporter.cnpj }
+                    : {}
+              try {
+                await api.put(`/nfe-emit/${id}/draft`, {
+                  ...(naturezaOperacao.trim() ? { naturezaOperacao: naturezaOperacao.trim() } : {}),
+                  ...transportadoraExtra,
+                  ...(draftExtra.freightType ? { freightType: draftExtra.freightType } : {}),
+                  ...(draftExtra.vehiclePlate ? { vehiclePlate: draftExtra.vehiclePlate } : {}),
+                  ...(draftExtra.vehicleUf ? { vehicleUf: draftExtra.vehicleUf } : {}),
+                  ...(draftExtra.volumesQty ? { volumesQty: parseDecimal(draftExtra.volumesQty) } : {}),
+                  ...(draftExtra.volumesSpecies ? { volumesSpecies: draftExtra.volumesSpecies } : {}),
+                  ...(draftExtra.volumesBrand ? { volumesBrand: draftExtra.volumesBrand } : {}),
+                  ...(draftExtra.weightNet ? { weightNet: parseDecimal(draftExtra.weightNet) } : {}),
+                  ...(draftExtra.weightGross ? { weightGross: parseDecimal(draftExtra.weightGross) } : {}),
+                  ...(draftExtra.refNFe.trim() ? { refNFe: draftExtra.refNFe.trim() } : {}),
+                  informacoesAdicionais: draftExtra.informacoesAdicionais,
+                })
+              } catch { /* ignora falha silenciosa — prévia abre mesmo assim */ }
               const base = import.meta.env.VITE_API_URL || 'http://localhost:3000'
               window.open(`${base}/nfe-emit/${id}/danfe?tenantId=${tenantId}&companyId=${companyId}`, '_blank')
             }}
-            title="Visualizar prévia do DANFE (rascunho, sem chave de acesso real)"
+            title="Salva os campos e visualiza prévia do DANFE (sem chave de acesso real)"
           >
             Ver prévia DANFE
           </button>
@@ -419,6 +480,7 @@ export default function NfeDraftDetailPage() {
                 <option value="Venda de mercadoria">Venda de mercadoria</option>
                 <option value="Venda de produção do estabelecimento">Venda de produção do estabelecimento</option>
                 <option value="Transferência de mercadoria">Transferência de mercadoria</option>
+                <option value="Outra entrada de mercadoria ou serviço não especificada">Outra entrada não especificada (CFOP 2949)</option>
               </select>
             </Field>
             <Field label="Natureza da operação (texto que vai no XML)" required>
@@ -429,7 +491,7 @@ export default function NfeDraftDetailPage() {
                 onChange={e => setNaturezaOperacao(e.target.value)}
               />
             </Field>
-            <Field label="NF(s) do cliente referenciada — DEV (CFOP 5902)" hint="Uma por linha. Formato: número|MM/AAAA ou número|MM/AAAA|P (parcial). Ex.: 23778|10/2025 — aparece no DANFE como DEV. TOTAL DA SUA NF-E 23778 DE 10/2025. Para chave completa de 44 dígitos o NFref é também inserido no XML.">
+            <Field label="NF(s) do cliente referenciada — DEV (CFOP 5902/5903)" hint="Uma por linha. Formato: número|MM/AAAA ou número|MM/AAAA|P (parcial). Ex.: 23778|10/2025 — aparece no DANFE como DEV. TOTAL DA SUA NF-E 23778 DE 10/2025. Para chave completa de 44 dígitos o NFref é também inserido no XML.">
               <textarea
                 className="border rounded px-3 py-2 text-sm w-full font-mono text-xs"
                 rows={3}
@@ -534,7 +596,7 @@ export default function NfeDraftDetailPage() {
             <h3 className="font-semibold text-gray-800 mb-3">Totais da NF-e</h3>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
               <div className="bg-gray-50 border rounded-lg p-3">
-                <div className="text-xs text-gray-500 uppercase tracking-wide">Total Produtos (CFOP 5902)</div>
+                <div className="text-xs text-gray-500 uppercase tracking-wide">Total Produtos (retorno 5902/5903)</div>
                 <div className="text-xl font-bold text-gray-900 mt-1">R$ {toPtMoney(totals.total5902)}</div>
               </div>
               <div className="bg-gray-50 border rounded-lg p-3">
@@ -551,7 +613,7 @@ export default function NfeDraftDetailPage() {
               </div>
             </div>
             <div className="mt-3 text-sm text-gray-500">
-              <span className="font-medium">Quantidade total:</span>{' '}
+              <span className="font-medium">Quantidade total{totals.qtdCfopLabel ? ` (CFOP ${totals.qtdCfopLabel})` : ''}:</span>{' '}
               {Number(totals.qtd).toLocaleString('pt-BR')} unidades em {(nfe?.items ?? []).length} item(ns)
             </div>
           </div>
@@ -601,21 +663,31 @@ export default function NfeDraftDetailPage() {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <Field label="Transportadora">
-              <select
-                className="border rounded px-3 py-2 text-sm w-full"
+              <SearchableSelect
                 value={transportadoraId}
-                onChange={e => setTransportadoraId(e.target.value)}
-              >
-                <option value="">— Nenhuma / sem transportadora —</option>
-                {transporters.map((t: any) => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
-              </select>
+                onChange={setTransportadoraId}
+                emptyLabel="— Nenhuma / sem transportadora —"
+                placeholder="— Nenhuma —"
+                pinnedOptions={[{
+                  value: 'proprio',
+                  label: 'O Próprio',
+                  sublabel: ((nfe as any)?.customer ?? (nfe as any)?.supplier)?.name ?? 'cliente da NF',
+                }]}
+                options={(transporters as any[]).map((t: any) => ({
+                  value: t.id,
+                  label: t.name ?? '',
+                  sublabel: t.cnpj ?? undefined,
+                }))}
+              />
             </Field>
             <Field label="CNPJ da Transportadora (auto-preenchido)">
               <input
                 className="border rounded px-3 py-2 text-sm w-full bg-gray-50"
-                value={transporters.find((t: any) => t.id === transportadoraId)?.cnpj ?? nfe?.cnpjTransportadora ?? ''}
+                value={
+                  transportadoraId === 'proprio'
+                    ? (((nfe as any)?.customer ?? (nfe as any)?.supplier)?.document ?? '')
+                    : (transporters.find((t: any) => t.id === transportadoraId)?.cnpj ?? nfe?.cnpjTransportadora ?? '')
+                }
                 readOnly
                 placeholder="Selecionada acima"
               />
@@ -857,12 +929,12 @@ export default function NfeDraftDetailPage() {
       <div className="border rounded-lg px-4 py-3 bg-gray-50 flex flex-wrap items-center justify-between gap-3">
         <div className="text-sm text-gray-700 flex flex-wrap gap-4">
           <span><span className="text-gray-500">Itens:</span> <strong>{(nfe?.items ?? []).length}</strong></span>
-          <span><span className="text-gray-500">Qtd total:</span> <strong>{Number(totals.qtd).toLocaleString('pt-BR')}</strong></span>
+          <span><span className="text-gray-500">Qtd{totals.qtdCfopLabel ? ` (${totals.qtdCfopLabel})` : ''}:</span> <strong>{Number(totals.qtd).toLocaleString('pt-BR')}</strong></span>
           <span><span className="text-gray-500">Total produtos:</span> <strong>R$ {toPtMoney(totals.total5902)}</strong></span>
           <span><span className="text-gray-500">Serv./Insumos:</span> <strong>R$ {toPtMoney(totals.totalServicosInsumos)}</strong></span>
           <span><span className="text-gray-500">Total NF:</span> <strong>R$ {toPtMoney(totals.totalNF)}</strong></span>
           {totals.tribApprox > 0 && (
-            <span title="Trib. aprox.: Federal 13,45% + Estadual 18,00% sobre Serv./Insumos (exclui CFOP 5902)">
+            <span title="Trib. aprox.: Federal 13,45% + Estadual 18,00% sobre Serv./Insumos (exclui CFOPs de retorno 5902/5903)">
               <span className="text-gray-500">Trib. aprox.:</span> <strong className="text-slate-600">R$ {toPtMoney(totals.tribApprox)}</strong>
               <span className="text-xs text-gray-400 ml-1">(31,45% sobre serv./ins.)</span>
             </span>

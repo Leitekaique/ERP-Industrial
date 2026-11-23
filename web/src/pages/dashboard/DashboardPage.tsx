@@ -88,29 +88,67 @@ function DashboardContent({
   ano: number; setAno: (v: number) => void
   onApply: () => void
 }) {
-  const { faturamento, recebiveis, payables, grafico, graficoQtd, graficoFluxo, topClientes, alertasBillings, periodo, tabelaProducao, ultimasTransacoes } = data
+  const { faturamento, recebiveis, payables, grafico, graficoQtd, graficoFluxo, topClientes, proximosTitulos, periodo, tabelaProducao, ultimasTransacoes } = data
   const { saldo, setSaldo } = useSaldoCC()
 
   const variacaoFat = faturamento.variacao
   const VarIcon = variacaoFat === null ? Minus : variacaoFat >= 0 ? TrendingUp : TrendingDown
   const varColor = variacaoFat === null ? 'text-gray-400' : variacaoFat >= 0 ? 'text-green-600' : 'text-red-600'
 
-  // ── Filtro de empresa (cliente) para os gráficos de 6 meses ─────────────────
-  const clientesDisponiveis = useMemo(() => {
+  // ── Filtro de empresa para gráfico de faturamento ────────────────────────────
+  // Usa todos os clientes que aparecem nos 6 meses, não só o top do mês
+  const clientesDisponiveisFat = useMemo(() => {
+    const map = new Map<string, string>()
+    topClientes.forEach(c => { if (c.customerId) map.set(c.customerId, c.name) })
+    // Complementa com clientes dos dados do gráfico (6 meses)
+    grafico.forEach(g => g.porCliente.forEach(pc => {
+      if (pc.customerId !== '__unknown' && !map.has(pc.customerId)) {
+        map.set(pc.customerId, pc.customerId) // nome não disponível aqui; será substituído pelo topClientes se existir
+      }
+    }))
+    return Array.from(map.entries())
+  }, [topClientes, grafico])
+
+  const [clienteFiltroFat, setClienteFiltroFat] = useState('')
+  const [clienteFiltroQtd, setClienteFiltroQtd] = useState('')
+
+  const graficoFatFiltrado = useMemo(() => {
+    if (!clienteFiltroFat) return grafico
+    return grafico.map(g => ({
+      ...g,
+      total: g.porCliente.find(c => c.customerId === clienteFiltroFat)?.total ?? 0,
+      projetado: 0, // filtro por cliente não aplica à projeção por ora
+    }))
+  }, [grafico, clienteFiltroFat])
+
+  // Clientes disponíveis no gráfico de quantidades
+  const clientesDisponiveisQtd = useMemo(() => {
     const map = new Map<string, string>()
     topClientes.forEach(c => { if (c.customerId) map.set(c.customerId, c.name) })
     return Array.from(map.entries())
   }, [topClientes])
 
-  const [clienteFiltro, setClienteFiltro] = useState('')
-
-  const graficoFiltrado = useMemo(() => {
-    if (!clienteFiltro) return grafico
-    return grafico.map(g => ({
+  const graficoQtdFiltrado = useMemo(() => {
+    if (!graficoQtd) return graficoQtd
+    if (!clienteFiltroQtd) return graficoQtd
+    return graficoQtd.map(g => ({
       ...g,
-      total: g.porCliente.find(c => c.customerId === clienteFiltro)?.total ?? 0,
+      qtd: g.porCliente?.find(c => c.customerId === clienteFiltroQtd)?.qtd ?? 0,
     }))
-  }, [grafico, clienteFiltro])
+  }, [graficoQtd, clienteFiltroQtd])
+
+  // ── Tabela de produção: agrupada por empresa ────────────────────────────────
+  const producaoAgrupada = useMemo(() => {
+    if (!tabelaProducao) return []
+    const empresaMap = new Map<string, { empresa: string; totalQtd: number; processos: { processo: string; qtd: number; unit: string }[] }>()
+    for (const row of tabelaProducao) {
+      if (!empresaMap.has(row.empresa)) empresaMap.set(row.empresa, { empresa: row.empresa, totalQtd: 0, processos: [] })
+      const entry = empresaMap.get(row.empresa)!
+      entry.totalQtd += row.qtd
+      entry.processos.push({ processo: row.processo, qtd: row.qtd, unit: row.unit })
+    }
+    return Array.from(empresaMap.values()).sort((a, b) => b.totalQtd - a.totalQtd)
+  }, [tabelaProducao])
 
   return (
     <div className="space-y-6">
@@ -153,7 +191,6 @@ function DashboardContent({
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-7 gap-4">
 
-        {/* Faturamento do mês */}
         <KpiCard
           icon={<DollarSign size={22} className="text-tapajos-600" />}
           label="Faturamento do mês"
@@ -168,7 +205,6 @@ function DashboardContent({
           }
         />
 
-        {/* NFs emitidas */}
         <KpiCard
           icon={<FileText size={22} className="text-blue-600" />}
           label="NFs emitidas"
@@ -176,7 +212,6 @@ function DashboardContent({
           sub={<span className="text-gray-400">Mês anterior: {faturamento.nfsEmitidasAnterior}</span>}
         />
 
-        {/* A receber em aberto */}
         <KpiCard
           icon={<DollarSign size={22} className="text-amber-600" />}
           label="A receber (aberto)"
@@ -184,7 +219,6 @@ function DashboardContent({
           sub={<span className="text-gray-400">{recebiveis.countAberto} título(s) no mês</span>}
         />
 
-        {/* Recebíveis vencidos */}
         <KpiCard
           icon={<AlertTriangle size={22} className={recebiveis.countVencido > 0 ? 'text-red-600' : 'text-gray-400'} />}
           label="A receber vencido"
@@ -197,7 +231,6 @@ function DashboardContent({
           highlight={recebiveis.countVencido > 0}
         />
 
-        {/* A pagar em aberto */}
         <KpiCard
           icon={<CreditCard size={22} className="text-purple-600" />}
           label="A pagar (aberto)"
@@ -205,7 +238,6 @@ function DashboardContent({
           sub={<span className="text-gray-400">{payables?.countAberto ?? 0} título(s) no mês</span>}
         />
 
-        {/* Pagamentos vencidos */}
         <KpiCard
           icon={<AlertTriangle size={22} className={(payables?.countVencido ?? 0) > 0 ? 'text-orange-600' : 'text-gray-400'} />}
           label="A pagar vencido"
@@ -218,61 +250,55 @@ function DashboardContent({
           highlight={(payables?.countVencido ?? 0) > 0}
         />
 
-        {/* Saldo conta corrente */}
         <SaldoCard saldo={saldo} onSave={setSaldo} />
       </div>
 
-      {/* Gráfico + Top Clientes */}
+      {/* Gráfico faturamento + Top Clientes */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
 
-        {/* Gráfico de faturamento — ocupa 2/3 da largura */}
         <div className="lg:col-span-2 border rounded-lg bg-white p-4 shadow-sm">
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-gray-600">Faturamento — Últimos 6 meses</h2>
+            <h2 className="text-sm font-semibold text-gray-600">Faturamento — últimos 6 meses + projeção</h2>
             <select
               className="border rounded px-2 py-1 text-xs text-gray-600"
-              value={clienteFiltro}
-              onChange={e => setClienteFiltro(e.target.value)}
+              value={clienteFiltroFat}
+              onChange={e => setClienteFiltroFat(e.target.value)}
             >
               <option value="">Todos os clientes</option>
-              {clientesDisponiveis.map(([id, name]) => (
+              {clientesDisponiveisFat.map(([id, name]) => (
                 <option key={id} value={id}>{name}</option>
               ))}
             </select>
           </div>
-          {graficoFiltrado.every(g => g.total === 0) ? (
-            <div className="flex items-center justify-center h-48 text-gray-400 text-sm">
-              Nenhuma NF autorizada nos últimos 6 meses.
-            </div>
-          ) : (
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={graficoFiltrado} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
-                <XAxis dataKey="label" tick={{ fontSize: 12 }} />
-                <YAxis
-                  tickFormatter={(v) => `R$ ${(v / 1000).toFixed(0)}k`}
-                  tick={{ fontSize: 11 }}
-                  width={60}
-                />
-                <Tooltip
-                  formatter={(value) => [brl(value as number), 'Faturamento']}
-                  labelStyle={{ fontWeight: 'bold' }}
-                />
-                <Bar dataKey="total" fill="#15803d" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={graficoFatFiltrado} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
+              <XAxis dataKey="label" tick={{ fontSize: 11 }} />
+              <YAxis
+                tickFormatter={(v) => `R$ ${(v / 1000).toFixed(0)}k`}
+                tick={{ fontSize: 11 }}
+                width={60}
+              />
+              <Tooltip
+                formatter={(value, name) => [brl(value as number), name === 'total' ? 'Realizado' : 'Projetado']}
+                labelStyle={{ fontWeight: 'bold' }}
+              />
+              <Legend formatter={(v) => v === 'total' ? 'Realizado' : 'Projetado'} />
+              <Bar dataKey="total" fill="#15803d" radius={[4, 4, 0, 0]} name="total" />
+              <Bar dataKey="projetado" fill="#86efac" radius={[4, 4, 0, 0]} name="projetado" />
+            </BarChart>
+          </ResponsiveContainer>
         </div>
 
-        {/* Top 5 clientes */}
+        {/* Top 10 clientes */}
         <div className="border rounded-lg bg-white p-4 shadow-sm">
           <h2 className="text-sm font-semibold text-gray-600 mb-3 flex items-center gap-1">
-            <Users size={14} /> Top clientes — {periodo.label}
+            <Users size={14} /> Top 10 clientes — {periodo.label}
           </h2>
           {topClientes.length === 0 ? (
             <p className="text-sm text-gray-400 mt-6 text-center">Nenhuma NF no mês.</p>
           ) : (
-            <ul className="space-y-2">
+            <ul className="space-y-1.5">
               {topClientes.map((c, i) => (
                 <li key={c.customerId ?? i} className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
@@ -292,81 +318,85 @@ function DashboardContent({
         </div>
       </div>
 
-      {/* Gráficos adicionais: Quantidades e Fluxo de Caixa */}
+      {/* Gráficos: Quantidades e Fluxo de Caixa */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
 
-        {/* Quantidades produzidas */}
+        {/* Quantidades produzidas — CFOP 5902/6902 */}
         <div className="border rounded-lg bg-white p-4 shadow-sm">
-          <h2 className="text-sm font-semibold text-gray-600 mb-3">Quantidades produzidas — Últimos 6 meses</h2>
-          {graficoQtd && graficoQtd.every(g => g.qtd === 0) ? (
-            <div className="flex items-center justify-center h-48 text-gray-400 text-sm">Sem dados de quantidade.</div>
-          ) : (
-            <ResponsiveContainer width="100%" height={200}>
-              <BarChart data={graficoQtd ?? []} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
-                <XAxis dataKey="label" tick={{ fontSize: 12 }} />
-                <YAxis tick={{ fontSize: 11 }} width={50} />
-                <Tooltip formatter={(v) => [Number(v).toLocaleString('pt-BR'), 'Quantidade']} />
-                <Bar dataKey="qtd" fill="#2563eb" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-gray-600">Qtd. produzida (CFOP 5902/6902) — 6 meses</h2>
+            <select
+              className="border rounded px-2 py-1 text-xs text-gray-600"
+              value={clienteFiltroQtd}
+              onChange={e => setClienteFiltroQtd(e.target.value)}
+            >
+              <option value="">Todos</option>
+              {clientesDisponiveisQtd.map(([id, name]) => (
+                <option key={id} value={id}>{name}</option>
+              ))}
+            </select>
+          </div>
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={graficoQtdFiltrado ?? []} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
+              <XAxis dataKey="label" tick={{ fontSize: 12 }} />
+              <YAxis tick={{ fontSize: 11 }} width={50} />
+              <Tooltip formatter={(v) => [Number(v).toLocaleString('pt-BR'), 'Quantidade']} />
+              <Bar dataKey="qtd" fill="#2563eb" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
         </div>
 
-        {/* Fluxo de Caixa */}
+        {/* Fluxo de Caixa — sempre exibe o gráfico */}
         <div className="border rounded-lg bg-white p-4 shadow-sm">
           <h2 className="text-sm font-semibold text-gray-600 mb-3">Fluxo de Caixa — Últimos 6 meses</h2>
-          {graficoFluxo && graficoFluxo.every(g => g.entradas === 0 && g.saidas === 0) ? (
-            <div className="flex items-center justify-center h-48 text-gray-400 text-sm">Sem pagamentos registrados.</div>
-          ) : (
-            <ResponsiveContainer width="100%" height={200}>
-              <LineChart data={graficoFluxo ?? []} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
-                <XAxis dataKey="label" tick={{ fontSize: 12 }} />
-                <YAxis tickFormatter={(v) => `R$ ${(v / 1000).toFixed(0)}k`} tick={{ fontSize: 11 }} width={60} />
-                <Tooltip formatter={(v) => [brl(v as number), '']} />
-                <Legend />
-                <Line type="monotone" dataKey="entradas" stroke="#16a34a" strokeWidth={2} dot={false} name="Entradas" />
-                <Line type="monotone" dataKey="saidas" stroke="#dc2626" strokeWidth={2} dot={false} name="Saídas" />
-                <Line type="monotone" dataKey="saldo" stroke="#9333ea" strokeWidth={2} strokeDasharray="5 5" dot={false} name="Saldo" />
-              </LineChart>
-            </ResponsiveContainer>
-          )}
+          <ResponsiveContainer width="100%" height={200}>
+            <LineChart data={graficoFluxo ?? []} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
+              <XAxis dataKey="label" tick={{ fontSize: 12 }} />
+              <YAxis tickFormatter={(v) => `R$ ${(v / 1000).toFixed(0)}k`} tick={{ fontSize: 11 }} width={60} />
+              <Tooltip formatter={(v) => [brl(v as number), '']} />
+              <Legend />
+              <Line type="monotone" dataKey="entradas" stroke="#16a34a" strokeWidth={2} dot={false} name="Entradas" />
+              <Line type="monotone" dataKey="saidas" stroke="#dc2626" strokeWidth={2} dot={false} name="Saídas" />
+              <Line type="monotone" dataKey="saldo" stroke="#9333ea" strokeWidth={2} strokeDasharray="5 5" dot={false} name="Saldo" />
+            </LineChart>
+          </ResponsiveContainer>
         </div>
       </div>
 
-      {/* Alertas de Billings vencidos / pendentes */}
-      {alertasBillings.length > 0 && (
+      {/* Próximos 10 títulos financeiros */}
+      {proximosTitulos && proximosTitulos.length > 0 && (
         <div className="border rounded-lg bg-white p-4 shadow-sm">
           <h2 className="text-sm font-semibold text-gray-600 mb-3 flex items-center gap-2">
-            <AlertTriangle size={14} className="text-amber-600" />
-            Faturas pendentes / vencidas
+            <CreditCard size={14} className="text-tapajos-600" />
+            Próximos vencimentos
           </h2>
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-left text-gray-500 border-b">
-                <th className="pb-2">Cliente</th>
-                <th className="pb-2">Período</th>
-                <th className="pb-2">Total</th>
-                <th className="pb-2">Status</th>
+              <tr className="text-left text-gray-500 border-b text-xs uppercase">
+                <th className="pb-2">Tipo</th>
+                <th className="pb-2">Vencimento</th>
+                <th className="pb-2">Contraparte</th>
+                <th className="pb-2 text-right">Valor</th>
               </tr>
             </thead>
             <tbody>
-              {alertasBillings.map(b => (
-                <tr key={b.id} className="border-t">
-                  <td className="py-2">{b.cliente}</td>
-                  <td className="py-2">
-                    {MESES[b.mes - 1]}/{b.ano}
-                  </td>
-                  <td className="py-2 font-medium">{brl(b.total)}</td>
-                  <td className="py-2">
+              {proximosTitulos.map(t => (
+                <tr key={t.id} className="border-t">
+                  <td className="py-1.5">
                     <span className={`px-2 py-0.5 rounded text-xs font-medium ${
-                      b.status === 'overdue'
-                        ? 'bg-red-100 text-red-700'
-                        : 'bg-amber-100 text-amber-700'
+                      t.tipo === 'receber' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
                     }`}>
-                      {b.status === 'overdue' ? 'Vencida' : 'Enviada'}
+                      {t.tipo === 'receber' ? 'A Receber' : 'A Pagar'}
                     </span>
+                  </td>
+                  <td className="py-1.5 text-gray-600">
+                    {new Date(t.data).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })}
+                  </td>
+                  <td className="py-1.5 truncate max-w-[180px]" title={t.contraparte}>{t.contraparte}</td>
+                  <td className={`py-1.5 text-right font-medium ${t.tipo === 'receber' ? 'text-green-700' : 'text-red-700'}`}>
+                    {brl(t.valor)}
                   </td>
                 </tr>
               ))}
@@ -375,27 +405,36 @@ function DashboardContent({
         </div>
       )}
 
-      {/* Tabela de Produção do mês */}
-      {tabelaProducao && tabelaProducao.length > 0 && (
+      {/* Tabela de Produção do mês — agrupada por empresa */}
+      {producaoAgrupada.length > 0 && (
         <div className="border rounded-lg bg-white p-4 shadow-sm">
           <h2 className="text-sm font-semibold text-gray-600 mb-3">Produção — {periodo.label}</h2>
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-gray-500 border-b text-xs uppercase">
-                <th className="pb-2">Empresa</th>
-                <th className="pb-2">Processo</th>
+                <th className="pb-2">Empresa / Processo</th>
                 <th className="pb-2 text-right">Quantidade</th>
               </tr>
             </thead>
             <tbody>
-              {tabelaProducao.map((row, i) => (
-                <tr key={i} className="border-t">
-                  <td className="py-1.5">{row.empresa}</td>
-                  <td className="py-1.5 text-gray-600">{row.processo}</td>
-                  <td className="py-1.5 text-right font-medium">
-                    {Number(row.qtd).toLocaleString('pt-BR')} {row.unit}
-                  </td>
-                </tr>
+              {producaoAgrupada.map((emp, ei) => (
+                <>
+                  {/* Linha de grupo: empresa */}
+                  <tr key={`emp-${ei}`} className="border-t bg-gray-50">
+                    <td className="py-1.5 font-semibold text-gray-800" colSpan={2}>
+                      {emp.empresa}
+                    </td>
+                  </tr>
+                  {/* Sub-linhas: processos */}
+                  {emp.processos.map((proc, pi) => (
+                    <tr key={`proc-${ei}-${pi}`} className="border-t">
+                      <td className="py-1.5 pl-4 text-gray-600">{proc.processo}</td>
+                      <td className="py-1.5 text-right font-medium">
+                        {Number(proc.qtd).toLocaleString('pt-BR')} {proc.unit}
+                      </td>
+                    </tr>
+                  ))}
+                </>
               ))}
             </tbody>
           </table>
@@ -511,7 +550,7 @@ function ProjecaoCaixa({ saldoAtual }: { saldoAtual: number | null }) {
   )
 }
 
-// ─── Saldo Conta Corrente Card (editável, persiste em localStorage) ───────────
+// ─── Saldo Conta Corrente Card ────────────────────────────────────────────────
 
 function SaldoCard({ saldo, onSave }: { saldo: number | null; onSave: (v: number | null) => void }) {
   const [editing, setEditing] = useState(false)
@@ -551,10 +590,10 @@ function SaldoCard({ saldo, onSave }: { saldo: number | null; onSave: (v: number
         </div>
       ) : (
         <div className="mt-2 flex items-end justify-between gap-1">
-          <div className={`text-2xl font-bold ${saldo === null ? 'text-gray-300' : saldo >= 0 ? 'text-sky-700' : 'text-red-700'}`}>
+          <div className={`text-2xl font-bold truncate ${saldo === null ? 'text-gray-300' : saldo >= 0 ? 'text-sky-700' : 'text-red-700'}`}>
             {saldo !== null ? brl(saldo) : '—'}
           </div>
-          <button onClick={() => setEditing(true)} className="text-gray-400 hover:text-gray-600 mb-1">
+          <button onClick={() => setEditing(true)} className="text-gray-400 hover:text-gray-600 mb-1 flex-shrink-0">
             <Pencil size={13} />
           </button>
         </div>
@@ -577,11 +616,11 @@ function KpiCard({
 }) {
   return (
     <div className={`border rounded-lg bg-white p-4 shadow-sm ${highlight ? 'border-red-300' : ''}`}>
-      <div className="flex items-start justify-between">
-        <span className="text-xs text-gray-500 font-medium uppercase tracking-wide">{label}</span>
-        {icon}
+      <div className="flex items-start justify-between gap-1">
+        <span className="text-xs text-gray-500 font-medium uppercase tracking-wide leading-tight">{label}</span>
+        <span className="flex-shrink-0">{icon}</span>
       </div>
-      <div className="mt-2 text-2xl font-bold text-gray-800">{value}</div>
+      <div className="mt-2 text-xl font-bold text-gray-800 truncate" title={value}>{value}</div>
       {sub && <div className="mt-1 text-xs">{sub}</div>}
     </div>
   )

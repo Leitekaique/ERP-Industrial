@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { useApi } from '../../lib/useApi'
+import { useApi, useDeleteNfeImport } from '../../lib/useApi'
 import { PageHeader } from '../../components/ui/PageHeader'
 import { EmptyState } from '../../components/ui/EmptyState'
 
@@ -8,6 +8,7 @@ const PAGE_SIZE = 50
 
 export default function NFeImportList() {
   const api = useApi()
+  const deleteNfeImport = useDeleteNfeImport()
   const [tenantId] = useState('T-001')
   const [companyId] = useState('C-001')
   const [nfes, setNfes] = useState<any[]>([])
@@ -179,14 +180,15 @@ export default function NFeImportList() {
               <th className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide cursor-pointer" onClick={() => handleSort('dataEmissao')}>
                 Data Emissão{sortIcon('dataEmissao')}
               </th>
+              <th className="px-4 py-3"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {loading && (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-sm text-slate-500">Carregando NF-es...</td></tr>
+              <tr><td colSpan={7} className="px-4 py-8 text-center text-sm text-slate-500">Carregando NF-es...</td></tr>
             )}
             {!loading && sorted.length === 0 && (
-              <EmptyState message="Nenhuma NF-e importada. Envie um XML para começar." colSpan={6} />
+              <EmptyState message="Nenhuma NF-e importada. Envie um XML para começar." colSpan={7} />
             )}
             {!loading && paged.map((nfe) => (
               <tr key={nfe.id} className="hover:bg-slate-50 transition-colors">
@@ -201,6 +203,29 @@ export default function NFeImportList() {
                 </td>
                 <td className="px-4 py-3 text-slate-500">
                   {new Date(nfe.dataEmissao).toLocaleDateString('pt-BR')}
+                </td>
+                <td className="px-4 py-3">
+                  {nfe.canDelete && (
+                    <button
+                      className="px-2 py-1 rounded text-xs font-medium bg-red-50 text-red-600 hover:bg-red-100 transition-colors disabled:opacity-40"
+                      title="Excluir NF importada (estoque não movimentado)"
+                      disabled={deleteNfeImport.isPending}
+                      onClick={async () => {
+                        if (!confirm(`Excluir NF ${nfe.nfNumber ?? nfe.accessKey}? Os lotes de estoque serão removidos.`)) return
+                        try {
+                          await deleteNfeImport.mutateAsync(nfe.id)
+                          setToast({ message: 'NF excluída com sucesso.', type: 'success' })
+                          setTimeout(() => setToast({ message: '', type: '' }), 4000)
+                          fetchNfes()
+                        } catch (err: any) {
+                          setToast({ message: err?.response?.data?.message ?? err.message ?? 'Erro ao excluir.', type: 'error' })
+                          setTimeout(() => setToast({ message: '', type: '' }), 5000)
+                        }
+                      }}
+                    >
+                      Excluir
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}

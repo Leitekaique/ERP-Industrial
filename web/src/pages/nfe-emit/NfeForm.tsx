@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { useCustomers, useSuppliers, useNfeCreateDraftFromStock } from '../../lib/useApi'
 import { api } from '../../lib/api'
+import { SearchableSelect } from '../../components/ui/SearchableSelect'
 
 const tenantId = String(import.meta.env.VITE_TENANT_ID ?? 'T-001')
 const companyId = String(import.meta.env.VITE_COMPANY_ID ?? 'C-001')
@@ -103,7 +104,7 @@ export default function NfeForm() {
     }
 
     const draft = await createDraft.mutateAsync(payload)
-    const draftId = draft?.id ?? draft?.data?.id
+    const draftId = draft?.nfeId ?? draft?.id ?? draft?.data?.id
     if (draftId) {
       nav(`/nfe-emit/${draftId}`)
     } else {
@@ -152,16 +153,17 @@ export default function NfeForm() {
             <span className="block text-sm font-medium text-gray-700 mb-1">
               {recipientTipo === 'CUSTOMER' ? 'Cliente' : 'Fornecedor'} <span className="text-red-500">*</span>
             </span>
-            <select
-              className="w-full border rounded px-3 py-2 text-sm"
+            <SearchableSelect
               value={recipientId}
-              onChange={e => setRecipientId(e.target.value)}
-            >
-              <option value="">— Selecione —</option>
-              {(recipientTipo === 'CUSTOMER' ? customers : suppliers as any[]).map((x: any) => (
-                <option key={x.id} value={x.id}>{x.nome ?? x.name}</option>
-              ))}
-            </select>
+              onChange={setRecipientId}
+              emptyLabel="— Selecione —"
+              placeholder="— Selecione —"
+              options={(recipientTipo === 'CUSTOMER' ? customers : suppliers as any[]).map((x: any) => ({
+                value: x.id,
+                label: x.nome ?? x.name ?? '',
+                sublabel: x.document ?? x.cnpj ?? undefined,
+              }))}
+            />
           </div>
         </div>
 

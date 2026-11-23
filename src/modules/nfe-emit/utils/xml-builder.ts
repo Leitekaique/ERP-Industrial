@@ -65,6 +65,7 @@ export interface NfeXmlDto {
   cNFCode?: string   // cNF persistido no banco — evita chave inconsistente entre chamadas
   refNFe?: string    // chave da NF de entrada referenciada (obrigatório para CFOP 5902 — NFref)
   tpAmb?: '1' | '2'
+  tpNF?: '0' | '1'          // 0=entrada, 1=saída (default '1')
   indIntermed?: '0' | '1'   // 0=operação normal, 1=com intermediador
   cliente: {
     nome: string
@@ -91,6 +92,7 @@ export interface NfeXmlDto {
     valorUnitario: number
     frete?: number
     cest?: string             // Código Especificador da Substituição Tributária
+    cBenef?: string           // Código de Benefício Fiscal (ex: SP054020 - Art. 402 RICMS)
     vTotTrib?: number           // tributos aproximados IBPT deste item
     impostos?: {
       icms?: { csosn?: string; aliquota?: number; valor?: number }
@@ -162,7 +164,7 @@ export function buildXml(dto: NfeXmlDto): string {
   ide.ele('nNF').txt(String(nNF))
   ide.ele('dhEmi').txt(dhEmi)
   ide.ele('dhSaiEnt').txt(dhSaiEnt)
-  ide.ele('tpNF').txt('1')
+  ide.ele('tpNF').txt(dto.tpNF ?? '1')
   // idDest: 1=intraestadual, 2=interestadual, 3=exterior
   const idDest = dto.cliente.uf && dto.uf && dto.cliente.uf.toUpperCase() !== dto.uf.toUpperCase() ? '2' : '1'
   ide.ele('idDest').txt(idDest)
@@ -217,9 +219,9 @@ export function buildXml(dto: NfeXmlDto): string {
   dest.ele('xNome').txt(tpAmb === '2' ? 'NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL' : dto.cliente.nome)
   const enderDest = dest.ele('enderDest')
   enderDest.ele('xLgr').txt(dto.cliente.endereco || 'N/D')
-  if (dto.cliente.numero) enderDest.ele('nro').txt(dto.cliente.numero)
+  enderDest.ele('nro').txt(dto.cliente.numero || 'S/N')
   if (dto.cliente.complemento) enderDest.ele('xCpl').txt(dto.cliente.complemento)
-  if (dto.cliente.bairro) enderDest.ele('xBairro').txt(dto.cliente.bairro)
+  enderDest.ele('xBairro').txt(dto.cliente.bairro || 'N/D')
   if (dto.cliente.municipioCodigo) enderDest.ele('cMun').txt(dto.cliente.municipioCodigo)
   enderDest.ele('xMun').txt(dto.cliente.municipio || 'N/D')
   enderDest.ele('UF').txt(dto.cliente.uf || 'SP')
@@ -227,8 +229,11 @@ export function buildXml(dto: NfeXmlDto): string {
   enderDest.ele('cPais').txt('1058')
   enderDest.ele('xPais').txt('BRASIL')
   if (dto.cliente.telefone) enderDest.ele('fone').txt(dto.cliente.telefone)
-  dest.ele('indIEDest').txt(dto.cliente.ie ? '1' : '9')
-  if (dto.cliente.ie) dest.ele('IE').txt(dto.cliente.ie)
+  // IE: strip formatação (pontos, traços) — schema NF-e 4.0 aceita apenas [0-9]{2,14} ou ISENTO
+  const ieDestRaw = dto.cliente.ie ?? ''
+  const ieDest = ieDestRaw.trim().toUpperCase() === 'ISENTO' ? 'ISENTO' : ieDestRaw.replace(/\D/g, '')
+  dest.ele('indIEDest').txt(ieDest ? '1' : '9')
+  if (ieDest) dest.ele('IE').txt(ieDest)
   if (dto.cliente.email) dest.ele('email').txt(dto.cliente.email)
 
   // ── ITENS (det) ────────────────────────────────────────────────────────────
@@ -240,6 +245,10 @@ export function buildXml(dto: NfeXmlDto): string {
     prod.ele('xProd').txt(item.descricao)
     prod.ele('NCM').txt(item.ncm || '00000000')
     if (item.cest) prod.ele('CEST').txt(item.cest)
+    // cBenef: auto-aplica SP054020 para todos os CFOPs de industrialização por encomenda e retorno
+    // (Art. 402 RICMS/SP + Portaria CAT 22/2007 — intra e interestadual, regular e triangulação)
+    const cBenef = item.cBenef ?? (['5902', '6902', '5903', '6903', '5124', '6124', '5125', '6125', '5925', '6925'].includes(item.cfop) ? 'SP054020' : undefined)
+    if (cBenef) prod.ele('cBenef').txt(cBenef)
     prod.ele('CFOP').txt(item.cfop)
     prod.ele('uCom').txt(item.unidade || 'UN')
     prod.ele('qCom').txt(item.quantidade.toFixed(4))
@@ -261,18 +270,22 @@ export function buildXml(dto: NfeXmlDto): string {
     }
 
     // ICMS — Simples Nacional usa CSOSN
-    const csosn = item.impostos?.icms?.csosn || '400'
+    const rawCsosn = item.impostos?.icms?.csosn || '400'
+    // ICMS suspenso (cBenef SP054020 — Art. 402 RICMS/SP): o comprador não pode aproveitar crédito
+    // de operação suspensa, portanto CSOSN 400 independente do cadastro do produto.
+    // CSOSN 900/201 também mapeados para ICMSSN102 pois ICMSSN900/201 exigem campos ST
+    // (modBC, vBC, pICMS, vICMS) que não fazem parte do fluxo atual.
+    const csosn = (cBenef === 'SP054020' || ['900', '201'].includes(rawCsosn)) ? '400' : rawCsosn
     const icmsNode = imposto.ele('ICMS')
-    if (['101', '201', '900'].includes(csosn)) {
-      // CSOSN com crédito (101=crédito simples, 201=ST+crédito, 900=outros com crédito)
-      const tagName = csosn === '201' ? 'ICMSSN201' : csosn === '900' ? 'ICMSSN900' : 'ICMSSN101'
-      const icms = icmsNode.ele(tagName)
+    if (csosn === '101') {
+      // ICMSSN101: único CSOSN com crédito suportado (só precisa de orig+CSOSN+pCredSN+vCredICMSSN)
+      const icms = icmsNode.ele('ICMSSN101')
       icms.ele('orig').txt('0')
-      icms.ele('CSOSN').txt(csosn)
+      icms.ele('CSOSN').txt('101')
       icms.ele('pCredSN').txt((item.impostos?.icms?.aliquota ?? 0).toFixed(4))
       icms.ele('vCredICMSSN').txt((item.impostos?.icms?.valor ?? 0).toFixed(2))
     } else {
-      // 102, 300, 400, 500, 103, etc — sem crédito
+      // 102, 300, 400, 500, 103 etc — sem crédito
       const icms = icmsNode.ele('ICMSSN102')
       icms.ele('orig').txt('0')
       icms.ele('CSOSN').txt(csosn)
@@ -324,7 +337,10 @@ export function buildXml(dto: NfeXmlDto): string {
   transp.ele('modFrete').txt(String(dto.transporte?.modFrete ?? 1))
   if (dto.transporte?.transportadora || dto.transporte?.cnpj) {
     const transporta = transp.ele('transporta')
-    if (dto.transporte.cnpj) transporta.ele('CNPJ').txt(dto.transporte.cnpj.replace(/\D/g, ''))
+    if (dto.transporte.cnpj) {
+      const docTransp = dto.transporte.cnpj.replace(/\D/g, '')
+      transporta.ele(docTransp.length === 14 ? 'CNPJ' : 'CPF').txt(docTransp)
+    }
     if (dto.transporte.transportadora) transporta.ele('xNome').txt(dto.transporte.transportadora)
     if (dto.transporte.ie) transporta.ele('IE').txt(dto.transporte.ie)
     if (dto.transporte.endereco) transporta.ele('xEnder').txt(dto.transporte.endereco)
@@ -335,8 +351,8 @@ export function buildXml(dto: NfeXmlDto): string {
   vol.ele('qVol').txt(String(dto.transporte?.qVol ?? 0))
   if (dto.transporte?.esp) vol.ele('esp').txt(dto.transporte.esp)
   if (dto.transporte?.marca) vol.ele('marca').txt(dto.transporte.marca)
-  vol.ele('pesoL').txt((dto.transporte?.pesoL ?? 0).toFixed(3))
-  vol.ele('pesoB').txt((dto.transporte?.pesoB ?? 0).toFixed(3))
+  if (dto.transporte?.pesoL) vol.ele('pesoL').txt(dto.transporte.pesoL.toFixed(3))
+  if (dto.transporte?.pesoB) vol.ele('pesoB').txt(dto.transporte.pesoB.toFixed(3))
 
   // ── COBRANÇA (fatura + duplicatas) ─────────────────────────────────────────
   // Obrigatório em NF-e de beneficiamento/serviço com condição de pagamento definida
@@ -378,6 +394,12 @@ export function buildXml(dto: NfeXmlDto): string {
   if (crt === '1') {
     disclaimers.push('I. DOC. EMITIDO POR ME OU EPP OPTANTE PELO SIMPLES NACIONAL')
     disclaimers.push('II. NAO GERA DIREITO A CREDITO FISCAL DE IPI')
+  }
+
+  // Industrialização por encomenda (retorno regular ou triangulação): declara suspensão ICMS - Art. 402 RICMS/SP
+  const temIndustrializacao = dto.itens.some(it => ['5902', '6902', '5903', '6903', '5124', '6124', '5125', '6125', '5925', '6925'].includes(it.cfop))
+  if (temIndustrializacao) {
+    disclaimers.push('III. ICMS SUSPENSO - ART. 402 DO RICMS/SP C/C PORTARIA CAT 22/2007')
   }
 
   if (dto.informacoesAdicionais) disclaimers.push(dto.informacoesAdicionais)

@@ -42,10 +42,13 @@ export class NfeEmitService {
     return billable.reduce((acc: number, it: any) => acc + Number(it.total ?? 0), 0)
   }
 
-  /** Monta lista de destinatários: email do destinatário + email do escritório */
-  private buildRecipientList(primaryEmail: string | null | undefined): string[] {
+  /** Monta lista de destinatários: email do destinatário + adicionais + email do escritório */
+  private buildRecipientList(primaryEmail: string | null | undefined, ...extras: (string | null | undefined)[]): string[] {
     const list: string[] = []
     if (primaryEmail) list.push(primaryEmail)
+    for (const e of extras) {
+      if (e && !list.includes(e)) list.push(e)
+    }
     if (OFFICE_EMAIL && !list.includes(OFFICE_EMAIL)) list.push(OFFICE_EMAIL)
     return list.length > 0 ? list : (OFFICE_EMAIL ? [OFFICE_EMAIL] : [])
   }
@@ -111,7 +114,10 @@ export class NfeEmitService {
         supplier: { select: { id: true, name: true, document: true } },
         items: { select: { qty: true, kind: true, total: true, cfop: true } },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [
+        { number: { sort: 'desc', nulls: 'first' } },
+        { createdAt: 'desc' },
+      ],
       take: 200,
     })
 
@@ -194,30 +200,42 @@ export class NfeEmitService {
     const receiver = nfe.customer ?? nfe.supplier
     const emitente = nfe.company as any
 
-    const billingAmount = this.calcBillingAmount(nfe.items ?? [])
+    const allItemCfops = (nfe.items ?? []).map((it: any) => String(it.cfop ?? ''))
+    const isEntradaNfe = allItemCfops.length > 0 && allItemCfops.every(c => c.startsWith('1') || c.startsWith('2') || c.startsWith('3'))
+    const billingAmount = isEntradaNfe ? null : this.calcBillingAmount(nfe.items ?? [])
     const icmsSnRate = Number((nfe.company as any)?.icmsSnRate ?? 0)
-    const ibptRates = await this.ibpt.getRates(nfe.companyId)
+    const ibptRates = await this.ibpt.getWeightedRatesForItems(
+      (nfe.items ?? []).map(i => ({ ncm: i.ncm, cfop: i.cfop, total: Number(i.total ?? 0) })),
+      (nfe.company as any)?.cnpj ?? '',
+      nfe.companyId,
+    )
 
     const totalProducts = Number(nfe.totalProducts ?? 0)
     const totalInvoice = Number(nfe.totalInvoice ?? totalProducts)
 
     // Reconstrói infoAdic com crédito ICMS + IBPT para o DANFE
+    const CFOPS_ICMS_SUSPENSO = new Set(['5902', '6902', '5903', '6903', '5124', '6124', '5125', '6125', '5925', '6925'])
     const danfeItens = (nfe.items ?? []).map((it: any) => {
       const taxes = it.taxes as any
-      const csosn = taxes?.csosn ? String(taxes.csosn) : '400'
+      const rawCsosn = taxes?.csosn ? String(taxes.csosn) : '400'
       const total = Number(it.total ?? 0)
-      const hasCredit = ['101', '201', '900'].includes(csosn)
+      // Sem crédito quando ICMS suspenso (Art. 402) ou CSOSN sem suporte completo (900/201)
+      const isIcmsSuspenso = CFOPS_ICMS_SUSPENSO.has(String(it.cfop ?? ''))
+      const hasCredit = !isIcmsSuspenso && rawCsosn === '101'
       const pCredSN = hasCredit ? icmsSnRate : 0
       const vCredICMSSN = hasCredit ? parseFloat((total * pCredSN / 100).toFixed(2)) : 0
+      const csosn = isIcmsSuspenso ? '400' : rawCsosn
       return { impostos: { icms: { csosn, valor: vCredICMSSN } } }
     })
-    const billingBase = billingAmount ?? totalInvoice
+    const billingBase = billingAmount ?? 0
     const totalNFComFrete = totalInvoice + Number((nfe as any).freightValue ?? 0)
-    const bodyInfoAdic = this.buildInfoAdic(danfeItens, icmsSnRate, undefined, billingBase > 0 ? billingBase : undefined, (nfe as any).refNFe ?? undefined, ibptRates, 'pdf') as any
+    const bodyInfoAdic = this.buildInfoAdic(danfeItens, icmsSnRate, undefined, billingBase > 0 ? billingBase : undefined, (nfe as any).refNFe ?? undefined, ibptRates, 'pdf', (nfe as any).informacoesAdicionais ?? undefined) as any
+    const temIndustrializacaoDanfe = (nfe.items ?? []).some((it: any) => ['5902', '6902', '5903', '6903', '5124', '6124', '5125', '6125', '5925', '6925'].includes(it.cfop))
     const danfeLines = [
       'I. DOC. EMITIDO POR ME OU EPP OPTANTE PELO SIMPLES NACIONAL',
       'II. NAO GERA DIREITO A CREDITO FISCAL DE IPI',
       ...(bodyInfoAdic?.top ? [bodyInfoAdic.top] : []),
+      ...(temIndustrializacaoDanfe ? ['ICMS SUSPENSO - ART. 402 DO RICMS/SP C/C PORTARIA CAT 22/2007'] : []),
     ]
     const danfeInfoAdic = danfeLines.join('\n')
     const danfeInfoAdicBottom: string | undefined = bodyInfoAdic?.bottom ?? undefined
@@ -242,11 +260,11 @@ export class NfeEmitService {
       } catch { /* mantém '2' se falhar */ }
     }
 
-    // Build duplicatas from billingTerms if available
+    // Build duplicatas from billingTerms if available (only for NFs with billable items)
     const dupList: { numero: string; vencimento: string; valor: number }[] = []
-    if ((receiver as any)?.billingTerms && totalInvoice > 0) {
+    if ((receiver as any)?.billingTerms && billingAmount !== null && billingAmount > 0) {
       const terms = (receiver as any).billingTerms as string
-      const dupVal = (billingAmount ?? totalInvoice) + Number((nfe as any).freightValue ?? 0)
+      const dupVal = billingAmount + Number((nfe as any).freightValue ?? 0)
       const installments = this.parseInstallments(terms, new Date(nfe.issuedAt ?? nfe.createdAt), dupVal)
       if (installments) {
         installments.forEach((inst, i) => {
@@ -297,9 +315,9 @@ export class NfeEmitService {
       destEmail: receiver?.email ?? undefined,
 
       faturaNumero: nfe.number ? String(nfe.number).padStart(9, '0') : undefined,
-      faturaValorOriginal: (billingAmount ?? totalInvoice) + Number((nfe as any).freightValue ?? 0),
+      faturaValorOriginal: (billingAmount ?? 0) + Number((nfe as any).freightValue ?? 0),
       faturaValorDesconto: 0,
-      faturaValorLiquido: (billingAmount ?? totalInvoice) + Number((nfe as any).freightValue ?? 0),
+      faturaValorLiquido: (billingAmount ?? 0) + Number((nfe as any).freightValue ?? 0),
       duplicatas: dupList.length > 0 ? dupList : undefined,
 
       items: (nfe.items ?? []).map((it: any, i: number) => {
@@ -378,6 +396,51 @@ export class NfeEmitService {
   }
 
   // ===========================================================
+  // ✅ SALVAR CAMPOS EXTRAS DO DRAFT (sem emitir)
+  // PUT /nfe-emit/:id/draft
+  // ===========================================================
+  async saveDraftExtra(id: string, dto: any): Promise<void> {
+    const updateData: any = {}
+    if (dto.naturezaOperacao?.trim()) updateData.naturezaOperacao = dto.naturezaOperacao.trim()
+    if (dto.transportadoraNome?.trim()) updateData.transportadora = dto.transportadoraNome.trim()
+    if (dto.transportadoraCnpj?.trim()) {
+      updateData.cnpjTransportadora = dto.transportadoraCnpj.trim()
+      const carrier = await this.prisma.transporter.findFirst({
+        where: { cnpj: dto.transportadoraCnpj.trim().replace(/\D/g, '') },
+      }).catch(() => null) ?? await this.prisma.transporter.findFirst({
+        where: { cnpj: dto.transportadoraCnpj.trim() },
+      }).catch(() => null)
+      if (carrier) {
+        if (carrier.name) updateData.transportadora = carrier.name
+        if ((carrier as any).ie) updateData.ieTransportadora = (carrier as any).ie
+        const addr = [carrier.address, carrier.number].filter(Boolean).join(', ')
+        if (addr) updateData.endTransportadora = addr
+        if (carrier.city) updateData.municipioTransportadora = carrier.city
+        if (carrier.state) updateData.ufTransportadora = carrier.state
+      }
+    }
+    const freightMap: Record<string, string> = {
+      destinatario: 'DESTINATARIO', remetente: 'EMITENTE',
+      terceiros: 'TERCEIROS', sem_frete: 'SEM_FRETE',
+    }
+    if (dto.freightType?.trim()) updateData.freightPayer = freightMap[dto.freightType.trim()] ?? 'DESTINATARIO'
+    if (dto.vehiclePlate?.trim()) updateData.vehiclePlate = dto.vehiclePlate.trim()
+    if (dto.vehicleUf?.trim()) updateData.vehicleUf = dto.vehicleUf.trim()
+    if (dto.volumesQty) updateData.volumesQty = Number(dto.volumesQty)
+    if (dto.volumesSpecies?.trim()) updateData.volumesSpecies = dto.volumesSpecies.trim()
+    if (dto.volumesBrand?.trim()) updateData.volumesBrand = dto.volumesBrand.trim()
+    if (dto.weightNet) updateData.weightNet = new Decimal(dto.weightNet)
+    if (dto.weightGross) updateData.weightGross = new Decimal(dto.weightGross)
+    if (dto.refNFe?.trim()) updateData.refNFe = dto.refNFe.trim()
+    if (typeof dto.informacoesAdicionais === 'string') {
+      updateData.informacoesAdicionais = dto.informacoesAdicionais.trim() || null
+    }
+    if (Object.keys(updateData).length) {
+      await this.prisma.nfe.update({ where: { id }, data: updateData })
+    }
+  }
+
+  // ===========================================================
   // ✅ EMITIR A PARTIR DO DRAFT (model Nfe)
   // POST /nfe-emit/:id/emit
   // Body: { tenantId, companyId, naturezaOperacao? }
@@ -453,6 +516,22 @@ export class NfeEmitService {
         throw new BadRequestException(
           `Cliente com cadastro incompleto — campos obrigatórios faltando: ${missing.join(', ')}. ` +
           `Acesse Clientes > editar e preencha antes de emitir a NF.`,
+        )
+      }
+    }
+
+    if (nfe.supplier) {
+      const missing: string[] = []
+      if (!nfe.supplier.document) missing.push('CNPJ/CPF')
+      if (!(nfe.supplier as any).address) missing.push('Endereço')
+      if (!(nfe.supplier as any).city) missing.push('Cidade')
+      if (!(nfe.supplier as any).state) missing.push('UF')
+      if (!(nfe.supplier as any).zip) missing.push('CEP')
+      if (!(nfe.supplier as any).cityCode) missing.push('Código IBGE do município')
+      if (missing.length > 0) {
+        throw new BadRequestException(
+          `Fornecedor com cadastro incompleto — campos obrigatórios faltando: ${missing.join(', ')}. ` +
+          `Acesse Fornecedores > editar e preencha antes de emitir a NF.`,
         )
       }
     }
@@ -551,7 +630,11 @@ export class NfeEmitService {
     }
 
     // ── Gera e assina o XML ───────────────────────────────────────────────────
-    const ibptRatesForEmit = await this.ibpt.getRates(nfe.companyId)
+    const ibptRatesForEmit = await this.ibpt.getWeightedRatesForItems(
+      (nfe.items ?? []).map(i => ({ ncm: i.ncm, cfop: i.cfop, total: Number(i.total ?? 0) })),
+      (nfe.company as any)?.cnpj ?? '',
+      nfe.companyId,
+    )
     const emitDto = this.buildEmitDtoFromDraft(nfe, nextNfeNumber, tpAmb, dto.freteValor ?? 0, ibptRatesForEmit)
     const xml = buildXml(emitDto)
     const signedXml = signXml(xml, certBuffer ?? Buffer.alloc(0), certPassword)
@@ -605,10 +688,15 @@ export class NfeEmitService {
       // Valor a receber = soma dos itens com CFOP cobrável + frete emitente (se houver)
       const cfopBilling = this.calcBillingAmount(updated.items ?? [])
       const freteAmt = dto.freteValor ?? 0
+      // cfopBilling === null significa que todos os itens são não faturáveis (ex: CFOP 5903 reprocesso)
       const nfeAmount = cfopBilling !== null
         ? new Decimal(cfopBilling).add(freteAmt)
-        : new Decimal(updated.totalInvoice ?? 0).add(freteAmt)
+        : new Decimal(0)
       const dueDate = this.computeDueDateFromBillingTerms(issueDate, billingTerms)
+
+      if (nfeAmount.isZero()) {
+        this.logger.log(`ℹ️ NF ${updated.number} sem itens faturáveis (CFOPs não cobráveis) — a receber não gerado`)
+      } else {
 
       const isMonthly = billingTerms === 'dia15' || billingTerms === 'dia20'
       const installments = this.parseInstallments(billingTerms, issueDate, nfeAmount.toNumber())
@@ -684,6 +772,8 @@ export class NfeEmitService {
         })
         this.logger.log(`💰 Receivable por NF criado (${billingTerms}) — vencimento ${dueDate.toISOString().slice(0, 10)}`)
       }
+
+      } // end nfeAmount.isZero() guard
     }
 
     // ── Registra no histórico de processos ────────────────────────────────────
@@ -744,8 +834,8 @@ export class NfeEmitService {
       this.prisma.nfe.findUnique({
         where: { id: nfeId },
         include: {
-          customer: { select: { name: true, email: true } },
-          supplier: { select: { name: true, email: true } },
+          customer: { select: { name: true, email: true, emailAdicional1: true } },
+          supplier: { select: { name: true, email: true, emailAdicional1: true } },
           company: { select: { tradeName: true, legalName: true, email: true, phone: true } },
         },
       }),
@@ -758,7 +848,8 @@ export class NfeEmitService {
     const emitNome = nfe.company?.tradeName || nfe.company?.legalName || 'Tapajós'
 
     const recipientEmail = nfe.customer?.email ?? nfe.supplier?.email ?? null
-    const toList = this.buildRecipientList(recipientEmail)
+    const emailAdicional = (nfe.customer as any)?.emailAdicional1 ?? (nfe.supplier as any)?.emailAdicional1 ?? null
+    const toList = this.buildRecipientList(recipientEmail, emailAdicional)
 
     // Monta URLs de consulta SEFAZ
     const chave = nfe.xmlPath?.match(/(\d{44})/)?.[1] ?? nfe.sefazProtocol ?? ''
@@ -781,12 +872,12 @@ export class NfeEmitService {
 </div>`,
       attachments: [
         {
-          filename: `danfe-${numFmt}.pdf`,
+          filename: `DANFE-${numFmt}.PDF`,
           content: danfePdf,
           contentType: 'application/pdf',
         },
         {
-          filename: `nfe-${numFmt}.xml`,
+          filename: chave ? `${chave}.xml` : `nfe-${numFmt}.xml`,
           content: Buffer.from(xmlContent, 'utf-8'),
           contentType: 'application/xml',
         },
@@ -998,9 +1089,52 @@ export class NfeEmitService {
   async deleteDraft(id: string) {
     const nfe = await this.prisma.nfe.findUnique({ where: { id } })
     if (!nfe) throw new BadRequestException('NF-e não encontrada.')
-    if (nfe.status !== 'draft') throw new BadRequestException('Somente rascunhos podem ser excluídos.')
-    await this.prisma.nfe.delete({ where: { id } })
-    return { message: 'Rascunho excluído com sucesso.' }
+    if (nfe.status !== 'draft' && nfe.status !== 'error') {
+      throw new BadRequestException('Somente rascunhos ou NFs com erro podem ser excluídos.')
+    }
+
+    // Busca movimentos de saída gerados por este draft para reverter o estoque
+    const outMovements = await this.prisma.stockMovement.findMany({
+      where: { reference: `NF_DRAFT:${id}`, type: 'out' as any },
+    })
+
+    await this.prisma.$transaction(async (tx) => {
+      for (const mov of outMovements) {
+        // Extrai o lotId do campo note: "Baixa por criação de NF (draft) - lote {lotId}"
+        const lotId = mov.note?.split('lote ')?.[1]?.trim()
+        if (lotId) {
+          await tx.stockLot.update({
+            where: { id: lotId },
+            data: { qtyRemaining: { increment: mov.qty as any } },
+          })
+        }
+
+        // Registra movimento de entrada como estorno
+        await tx.stockMovement.create({
+          data: {
+            tenantId: mov.tenantId,
+            companyId: mov.companyId,
+            warehouseId: mov.warehouseId,
+            productId: mov.productId,
+            type: 'in' as any,
+            qty: mov.qty,
+            ownership: mov.ownership,
+            customerId: mov.customerId,
+            supplierId: mov.supplierId,
+            occurredAt: new Date(),
+            reference: `ESTORNO_DRAFT:${id}`,
+            note: `Estorno por exclusão de NF draft - lote ${lotId ?? 'desconhecido'}`,
+          },
+        })
+      }
+
+      // Remove ProcessHistory vinculado ao draft antes de deletar o Nfe
+      await tx.processHistory.deleteMany({ where: { nfSaidaId: id } })
+
+      await tx.nfe.delete({ where: { id } })
+    })
+
+    return { message: `Rascunho excluído. ${outMovements.length} lote(s) devolvido(s) ao estoque.` }
   }
 
   // ===========================================================
@@ -1021,6 +1155,29 @@ export class NfeEmitService {
     if (xJust.length < 15) throw new BadRequestException('Justificativa deve ter pelo menos 15 caracteres.')
     if (xJust.length > 255) throw new BadRequestException('Justificativa deve ter no máximo 255 caracteres.')
 
+    const tpAmb: '1' | '2' = getSefazEnv() === 'producao' ? '1' : '2'
+
+    // Carrega certificado antes de assinar (prioridade banco → arquivo local)
+    let certBuffer: Buffer | null = null
+    let certPassword = ''
+    if (getSefazEnv() !== 'simulator') {
+      if (nfe.company.certA1Keystore) {
+        certBuffer = Buffer.from(nfe.company.certA1Keystore)
+        certPassword = nfe.company.certA1Password ?? ''
+      } else {
+        const certPath = path.resolve('certs/tapajos-cert.pfx')
+        if (fs.existsSync(certPath)) {
+          certBuffer = fs.readFileSync(certPath)
+          certPassword = process.env.CERT_PASSWORD ?? ''
+        }
+      }
+      if (!certBuffer) {
+        throw new BadRequestException(
+          'Certificado digital não encontrado. Faça o upload do certificado A1 no cadastro da empresa.'
+        )
+      }
+    }
+
     // Extrai chave de acesso (44 dígitos) do xmlPath ou sefazProtocol
     const chaveMatch =
       nfe.xmlPath?.match(/(\d{44})/) ?? nfe.sefazProtocol?.match(/(\d{44})/)
@@ -1031,11 +1188,9 @@ export class NfeEmitService {
       ? (nfe.sefazProtocol.match(/\d{15}/) as RegExpMatchArray)[0]
       : (nfe.sefazProtocol ?? '000000000000000')
 
-    const tpAmb: '1' | '2' = getSefazEnv() === 'producao' ? '1' : '2'
-
-    // Constrói e assina o XML do evento
+    // Constrói e assina o XML com o certificado já carregado
     const rawXml = buildCancelEventXml({ cnpjEmitente, chNFe, nProt, xJust, tpAmb })
-    const signedXml = signEventXml(rawXml)
+    const signedXml = signEventXml(rawXml, certBuffer ?? undefined, certPassword)
 
     // Salva XML no disco
     const eventDir = path.resolve('uploads/nfe_eventos')
@@ -1044,32 +1199,95 @@ export class NfeEmitService {
     const xmlFilePath = path.join(eventDir, xmlFileName)
     fs.writeFileSync(xmlFilePath, signedXml)
 
-    // Registra o evento no BD (xmlPath dentro do payload)
+    // Transmite ao SEFAZ (modo real) ou simula
+    let sefazStatus = 'simulated'
+    let sefazProtocol: string | null = 'SIMULADO'
+
+    if (getSefazEnv() !== 'simulator') {
+      const sefazResp = await this.callSefazEvento(signedXml, certBuffer!, certPassword)
+
+      // cStat 135 = registrado e vinculado; 136 = registrado mas não vinculado
+      const CANCEL_OK = new Set(['135', '136', '155'])
+      if (CANCEL_OK.has(sefazResp.cStat)) {
+        sefazStatus = 'authorized'
+        sefazProtocol = sefazResp.nProt ?? sefazResp.xMotivo
+      } else {
+        // SEFAZ rejeitou — registra o evento como erro, NF permanece autorizada no BD
+        await this.prisma.nfeEvent.create({
+          data: {
+            nfeId: id, type: 'cancel',
+            payload: {
+              xJust, chNFe, nProt, tpAmb,
+              xmlPath: xmlFilePath.replace(/\\/g, '/'),
+              nfeNumber: nfe.number, emitCnpj: cnpjEmitente,
+              emitNome: nfe.emitRazaoSocial, destNome: nfe.destRazaoSocial,
+              destCnpj: nfe.destCnpjCpf, issuedAt: nfe.issuedAt,
+              sefazCstat: sefazResp.cStat, sefazMotivo: sefazResp.xMotivo,
+            },
+            protocol: null, status: 'rejected',
+          },
+        })
+        throw new BadRequestException(
+          `SEFAZ rejeitou o cancelamento: ${sefazResp.xMotivo} (cStat ${sefazResp.cStat})`
+        )
+      }
+    }
+
+    // Registra o evento no BD
     const evento = await this.prisma.nfeEvent.create({
       data: {
-        nfeId: id,
-        type: 'cancel',
+        nfeId: id, type: 'cancel',
         payload: {
           xJust, chNFe, nProt, tpAmb,
           xmlPath: xmlFilePath.replace(/\\/g, '/'),
-          nfeNumber: nfe.number,
-          emitCnpj: cnpjEmitente,
-          emitNome: nfe.emitRazaoSocial,
-          destNome: nfe.destRazaoSocial,
-          destCnpj: nfe.destCnpjCpf,
-          issuedAt: nfe.issuedAt,
+          nfeNumber: nfe.number, emitCnpj: cnpjEmitente,
+          emitNome: nfe.emitRazaoSocial, destNome: nfe.destRazaoSocial,
+          destCnpj: nfe.destCnpjCpf, issuedAt: nfe.issuedAt,
         },
-        protocol: getSefazEnv() === 'simulator' ? 'SIMULADO' : null,
-        status: getSefazEnv() === 'simulator' ? 'simulated' : 'pending',
+        protocol: sefazProtocol,
+        status: sefazStatus,
       },
     })
 
-    // Atualiza status da NF
     await this.prisma.nfe.update({ where: { id }, data: { status: 'canceled' } })
+    this.logger.log(`NF-e ${nfe.number} cancelada — SEFAZ cStat=${sefazStatus} (evento ${evento.id})`)
 
-    this.logger.log(`NF-e ${nfe.number} cancelada (evento ${evento.id})`)
+    // Devolve itens ao estoque (mesmo padrão do deleteDraft)
+    const outMovements = await this.prisma.stockMovement.findMany({
+      where: { reference: `NF_DRAFT:${id}`, type: 'out' as any },
+    })
+    if (outMovements.length > 0) {
+      await this.prisma.$transaction(async (tx) => {
+        for (const mov of outMovements) {
+          const lotId = mov.note?.split('lote ')?.[1]?.trim()
+          if (lotId) {
+            await tx.stockLot.update({
+              where: { id: lotId },
+              data: { qtyRemaining: { increment: mov.qty as any } },
+            })
+          }
+          await tx.stockMovement.create({
+            data: {
+              tenantId: mov.tenantId,
+              companyId: mov.companyId,
+              warehouseId: mov.warehouseId,
+              productId: mov.productId,
+              type: 'in' as any,
+              qty: mov.qty,
+              ownership: mov.ownership,
+              customerId: mov.customerId,
+              supplierId: mov.supplierId,
+              occurredAt: new Date(),
+              reference: `ESTORNO_CANCEL:${id}`,
+              note: `Estorno por cancelamento de NF - lote ${lotId ?? 'desconhecido'}`,
+            },
+          })
+        }
+        await tx.processHistory.deleteMany({ where: { nfSaidaId: id } })
+      })
+      this.logger.log(`✅ ${outMovements.length} lote(s) devolvido(s) ao estoque após cancelamento NF ${nfe.number}`)
+    }
 
-    // Envia e-mail com PDF + XML do cancelamento
     this.enviarEmailEvento(evento.id).catch(err =>
       this.logger.warn(`E-mail cancelamento falhou: ${err?.message ?? err}`)
     )
@@ -1078,7 +1296,7 @@ export class NfeEmitService {
       message: 'NF-e cancelada com sucesso.',
       eventoId: evento.id,
       ambiente: tpAmb === '1' ? 'Produção' : 'Homologação',
-      status: evento.status,
+      status: sefazStatus,
     }
   }
 
@@ -1094,22 +1312,41 @@ export class NfeEmitService {
     if (correcaoTrimmed.length < 15) throw new BadRequestException('Texto da correção deve ter pelo menos 15 caracteres.')
     if (correcaoTrimmed.length > 1000) throw new BadRequestException('Texto da correção deve ter no máximo 1000 caracteres.')
 
-    // Determina o próximo número de sequência
     const cceAnteriores = nfe.events.filter((e: any) => e.type === 'cce').length
     const nSeqEvento = cceAnteriores + 1
     if (nSeqEvento > 20) throw new BadRequestException('Limite de 20 CC-es por NF-e atingido.')
 
-    // Extrai chave de acesso
-    const chaveMatch =
-      nfe.xmlPath?.match(/(\d{44})/) ?? nfe.sefazProtocol?.match(/(\d{44})/)
-    const chNFe = chaveMatch ? chaveMatch[1] : '0'.repeat(44)
-
-    const cnpjEmitente = nfe.emitCnpj ?? nfe.company?.cnpj ?? ''
     const tpAmb: '1' | '2' = getSefazEnv() === 'producao' ? '1' : '2'
 
-    // Constrói e assina o XML do evento
+    // Carrega certificado antes de assinar (prioridade banco → arquivo local)
+    let certBuffer: Buffer | null = null
+    let certPassword = ''
+    if (getSefazEnv() !== 'simulator') {
+      if (nfe.company.certA1Keystore) {
+        certBuffer = Buffer.from(nfe.company.certA1Keystore)
+        certPassword = nfe.company.certA1Password ?? ''
+      } else {
+        const certPath = path.resolve('certs/tapajos-cert.pfx')
+        if (fs.existsSync(certPath)) {
+          certBuffer = fs.readFileSync(certPath)
+          certPassword = process.env.CERT_PASSWORD ?? ''
+        }
+      }
+      if (!certBuffer) {
+        throw new BadRequestException(
+          'Certificado digital não encontrado. Faça o upload do certificado A1 no cadastro da empresa.'
+        )
+      }
+    }
+
+    // Extrai chave de acesso do nome do arquivo XML (gerado como "{44dígitos}.xml" na autorização)
+    const chNFe = nfe.xmlPath?.match(/(\d{44})/)?.[1] ?? '0'.repeat(44)
+
+    const cnpjEmitente = nfe.emitCnpj ?? nfe.company?.cnpj ?? ''
+
+    // Constrói e assina o XML com o certificado já carregado
     const rawXml = buildCceEventXml({ cnpjEmitente, chNFe, xCorrecao: correcaoTrimmed, tpAmb, nSeqEvento })
-    const signedXml = signEventXml(rawXml)
+    const signedXml = signEventXml(rawXml, certBuffer ?? undefined, certPassword)
 
     // Salva XML no disco
     const eventDir = path.resolve('uploads/nfe_eventos')
@@ -1118,23 +1355,51 @@ export class NfeEmitService {
     const xmlFilePath = path.join(eventDir, xmlFileName)
     fs.writeFileSync(xmlFilePath, signedXml)
 
-    // Registra o evento (xmlPath dentro do payload)
+    // Transmite ao SEFAZ (modo real) ou simula
+    let sefazStatus = 'simulated'
+    let sefazProtocol: string | null = 'SIMULADO'
+
+    if (getSefazEnv() !== 'simulator') {
+      const sefazResp = await this.callSefazEvento(signedXml, certBuffer!, certPassword)
+
+      const CCE_OK = new Set(['135', '136'])
+      if (CCE_OK.has(sefazResp.cStat)) {
+        sefazStatus = 'authorized'
+        sefazProtocol = sefazResp.nProt ?? sefazResp.xMotivo
+      } else {
+        await this.prisma.nfeEvent.create({
+          data: {
+            nfeId: id, type: 'cce',
+            payload: {
+              xCorrecao: correcaoTrimmed, chNFe, nSeqEvento, tpAmb,
+              xmlPath: xmlFilePath.replace(/\\/g, '/'),
+              nfeNumber: nfe.number, emitCnpj: cnpjEmitente,
+              emitNome: nfe.emitRazaoSocial, destNome: nfe.destRazaoSocial,
+              destCnpj: nfe.destCnpjCpf, issuedAt: nfe.issuedAt,
+              sefazCstat: sefazResp.cStat, sefazMotivo: sefazResp.xMotivo,
+            },
+            protocol: null, status: 'rejected',
+          },
+        })
+        throw new BadRequestException(
+          `SEFAZ rejeitou a CC-e: ${sefazResp.xMotivo} (cStat ${sefazResp.cStat})`
+        )
+      }
+    }
+
+    // Registra o evento
     const evento = await this.prisma.nfeEvent.create({
       data: {
-        nfeId: id,
-        type: 'cce',
+        nfeId: id, type: 'cce',
         payload: {
           xCorrecao: correcaoTrimmed, chNFe, nSeqEvento, tpAmb,
           xmlPath: xmlFilePath.replace(/\\/g, '/'),
-          nfeNumber: nfe.number,
-          emitCnpj: cnpjEmitente,
-          emitNome: nfe.emitRazaoSocial,
-          destNome: nfe.destRazaoSocial,
-          destCnpj: nfe.destCnpjCpf,
-          issuedAt: nfe.issuedAt,
+          nfeNumber: nfe.number, emitCnpj: cnpjEmitente,
+          emitNome: nfe.emitRazaoSocial, destNome: nfe.destRazaoSocial,
+          destCnpj: nfe.destCnpjCpf, issuedAt: nfe.issuedAt,
         },
-        protocol: getSefazEnv() === 'simulator' ? 'SIMULADO' : null,
-        status: getSefazEnv() === 'simulator' ? 'simulated' : 'pending',
+        protocol: sefazProtocol,
+        status: sefazStatus,
       },
     })
 
@@ -1150,7 +1415,7 @@ export class NfeEmitService {
       eventoId: evento.id,
       nSeqEvento,
       ambiente: tpAmb === '1' ? 'Produção' : 'Homologação',
-      status: evento.status,
+      status: sefazStatus,
     }
   }
 
@@ -1451,8 +1716,8 @@ export class NfeEmitService {
       },
       defaultRecipient,
       recipients: {
-        customers: customers.map(c => ({ id: c.id, nome: c.name, document: c.document })),
-        suppliers: suppliers.map(s => ({ id: s.id, nome: s.name, document: s.document })),
+        customers: customers.map(c => ({ id: c.id, nome: c.name, document: c.document, ie: c.ie ?? null, email: c.email ?? null, state: c.state ?? null, phone: c.phone ?? null, district: c.district ?? null, city: c.city ?? null })),
+        suppliers: suppliers.map(s => ({ id: s.id, nome: s.name, document: s.document, ie: (s as any).ie ?? null, email: s.email ?? null, state: (s as any).state ?? (s as any).uf ?? null, phone: s.phone ?? null, district: (s as any).district ?? null, city: (s as any).city ?? null })),
       },
       items,
       totals: { totalProducts },
@@ -1576,6 +1841,14 @@ export class NfeEmitService {
         },
       })
 
+      // Busca processo atribuído pelo usuário no cadastro do produto (tem prioridade sobre lot.processo)
+      const productIds = [...new Set(lots.map(l => l.productId))]
+      const products = await tx.product.findMany({
+        where: { id: { in: productIds } },
+        select: { id: true, processo: true },
+      })
+      const productById = new Map(products.map(p => [p.id, p]))
+
       if (lots.length !== lotIds.length) {
         const found = new Set(lots.map(l => l.id))
         const missing = lotIds.filter(x => !found.has(x))
@@ -1624,6 +1897,7 @@ export class NfeEmitService {
             empresaId: companyId,
 
             productId: lot.productId,
+            customerId: recipientTipo === 'CUSTOMER' ? customer!.id : null,
             type: ProcessHistoryType.STOCK_OUT,
             status: ProcessHistoryStatus.APPLIED,
 
@@ -1638,7 +1912,7 @@ export class NfeEmitService {
               lotId: lot.id,
               movementId: movement.id,
               sku: c.sku ?? null,
-              processo: lot.processo ?? null,
+              processo: productById.get(lot.productId)?.processo ?? lot.processo ?? null,
               empresaIdLote: lot.empresaId ?? null,
               recipient: {
                 tipo: recipientTipo,
@@ -1771,20 +2045,24 @@ export class NfeEmitService {
     const icmsSnRate = Number((emitente as any).icmsSnRate ?? 0)
 
     const ibptPct = (ibptRates?.federalPct ?? IBPT_FEDERAL_PCT) + (ibptRates?.estadualPct ?? IBPT_ESTADUAL_PCT)
-    const RETORNO_CFOPS = ['5902', '6902', '5903', '6903']
+    const RETORNO_CFOPS = ['5902', '6902', '5903', '6903', '5916', '6916', '5949', '6949', '5925', '6925']
+    const CFOPS_ICMS_SUSPENSO_EMIT = new Set(['5902', '6902', '5903', '6903', '5124', '6124', '5125', '6125', '5925', '6925'])
 
     const itens = (nfe.items ?? []).map((it: any) => {
       const taxes = it?.taxes as any
-      const csosn = taxes?.csosn ? String(taxes.csosn) : '400'
+      const rawCsosn = taxes?.csosn ? String(taxes.csosn) : '400'
       const cfop = String(it?.cfop ?? '')
       const total = Number(it.qty ?? 0) * Number(it.unitPrice ?? 0)
-      // Calcula crédito ICMS para CSOSN 101, 201, 900
-      const hasCredit = ['101', '201', '900'].includes(csosn)
+      // Sem crédito quando ICMS suspenso (Art. 402) ou CSOSN sem suporte completo (900/201)
+      const isIcmsSuspenso = CFOPS_ICMS_SUSPENSO_EMIT.has(cfop)
+      const hasCredit = !isIcmsSuspenso && rawCsosn === '101'
+      const csosn = isIcmsSuspenso ? '400' : rawCsosn
       const pCredSN = hasCredit ? icmsSnRate : 0
       const vCredICMSSN = hasCredit ? parseFloat((total * pCredSN / 100).toFixed(2)) : 0
-      // vTotTrib: apenas itens faturáveis (exclui retorno de industrialização 5902/6902)
+      // vTotTrib: zero para retornos e para NFs de entrada (1xxx/2xxx/3xxx)
       const isRetorno = RETORNO_CFOPS.some(c => cfop.startsWith(c.slice(0, 4)))
-      const vTotTrib = isRetorno ? 0 : parseFloat((total * ibptPct / 100).toFixed(2))
+      const isEntradaCfop = cfop.startsWith('1') || cfop.startsWith('2') || cfop.startsWith('3')
+      const vTotTrib = (isRetorno || isEntradaCfop) ? 0 : parseFloat((total * ibptPct / 100).toFixed(2))
       return {
         codigo: it.sku ?? '',
         descricao: it.description ?? '',
@@ -1810,42 +2088,53 @@ export class NfeEmitService {
       0,
     )
 
+    // tpNF: auto-detecta NF de entrada quando todos os CFOPs começam com 1, 2 ou 3
+    const allCfops = itens.map((it: any) => String(it.cfop ?? ''))
+    const isEntrada = allCfops.length > 0 && allCfops.every((c: string) => c.startsWith('1') || c.startsWith('2') || c.startsWith('3'))
+    const tpNF: '0' | '1' = isEntrada ? '0' : '1'
+
     // modFrete: mapeamento freightPayer (enum) → código numérico NF-e
     const freightPayerMap: Record<string, number> = {
       EMITENTE: 0, DESTINATARIO: 1, TERCEIROS: 2, SEM_FRETE: 9,
     }
     const modFrete = freightPayerMap[nfe.freightPayer ?? ''] ?? 1
 
-    // Valor de cobrança: exclui CFOPs de retorno/devolução do cliente
-    const billingAmt = this.calcBillingAmount(nfe.items ?? []) ?? totalProdutos
-    const nonBillingAmt = parseFloat((totalProdutos - billingAmt).toFixed(2))
-
-    // Cobrança: gera cobr a partir de billingTerms do cliente
-    const billingTerms = (nfe.customer as any)?.billingTerms ?? null
+    // NF de entrada não tem cobrança nem pagamento real
+    let billingAmt = 0
+    let nonBillingAmt = 0
     let cobrSection: NfeXmlDto['cobr'] | undefined
-    if (billingTerms && billingAmt > 0) {
-      const nfNumStr = String(nNF ?? '').padStart(9, '0')
-      // Fatura e duplicata incluem frete do emitente (vFrete somado ao valor de cobrança)
-      const billingAmtTotal = parseFloat((billingAmt + freteValor).toFixed(2))
-      const installments = this.parseInstallments(billingTerms, new Date(), billingAmtTotal)
-      if (installments) {
-        cobrSection = {
-          fatura: { numero: nfNumStr, vOrig: billingAmtTotal, vLiq: billingAmtTotal },
-          duplicatas: installments.map((inst, i) => ({
-            numero: String(i + 1).padStart(3, '0'),
-            dVenc: inst.dueDate.toISOString().slice(0, 10),
-            valor: inst.amount.toNumber(),
-          })),
-        }
-      } else {
-        const dueDate = this.computeDueDateFromBillingTerms(new Date(), billingTerms)
-        cobrSection = {
-          fatura: { numero: nfNumStr, vOrig: billingAmtTotal, vLiq: billingAmtTotal },
-          duplicatas: [{
-            numero: '001',
-            dVenc: dueDate.toISOString().slice(0, 10),
-            valor: billingAmtTotal,
-          }],
+
+    if (!isEntrada) {
+      // Valor de cobrança: exclui CFOPs de retorno/devolução do cliente (null = sem itens cobráveis)
+      const billingAmtRaw = this.calcBillingAmount(nfe.items ?? [])
+      billingAmt = billingAmtRaw ?? 0
+      nonBillingAmt = parseFloat((totalProdutos - billingAmt).toFixed(2))
+
+      // Cobrança: gera cobr a partir de billingTerms do cliente
+      const billingTerms = (nfe.customer as any)?.billingTerms ?? null
+      if (billingTerms && billingAmt > 0) {
+        const nfNumStr = String(nNF ?? '').padStart(9, '0')
+        const billingAmtTotal = parseFloat((billingAmt + freteValor).toFixed(2))
+        const installments = this.parseInstallments(billingTerms, new Date(), billingAmtTotal)
+        if (installments) {
+          cobrSection = {
+            fatura: { numero: nfNumStr, vOrig: billingAmtTotal, vLiq: billingAmtTotal },
+            duplicatas: installments.map((inst, i) => ({
+              numero: String(i + 1).padStart(3, '0'),
+              dVenc: inst.dueDate.toISOString().slice(0, 10),
+              valor: inst.amount.toNumber(),
+            })),
+          }
+        } else {
+          const dueDate = this.computeDueDateFromBillingTerms(new Date(), billingTerms)
+          cobrSection = {
+            fatura: { numero: nfNumStr, vOrig: billingAmtTotal, vLiq: billingAmtTotal },
+            duplicatas: [{
+              numero: '001',
+              dVenc: dueDate.toISOString().slice(0, 10),
+              valor: billingAmtTotal,
+            }],
+          }
         }
       }
     }
@@ -1853,6 +2142,7 @@ export class NfeEmitService {
     const emitDto: NfeXmlDto = {
       nNF,
       tpAmb,
+      tpNF,
 
       naturezaOperacao: nfe.naturezaOperacao ?? 'Prestacao de servico de beneficiamento',
       cnpjEmitente: String(emitente.cnpj ?? ''),
@@ -1900,12 +2190,14 @@ export class NfeEmitService {
 
       cobr: cobrSection,
 
-      pagamento: {
-        formas: [
-          { indPag: 1, tipo: '01', valor: billingAmt },
-          ...(nonBillingAmt > 0.001 ? [{ tipo: '99', valor: nonBillingAmt, descricao: 'RETORNO SIMBOLICO' }] : []),
-        ],
-      },
+      pagamento: isEntrada
+        ? { formas: [{ tipo: '99', valor: totalProdutos + freteValor, descricao: 'SEM PAGAMENTO' }] }
+        : {
+          formas: [
+            { indPag: 1, tipo: '01', valor: billingAmt },
+            ...(nonBillingAmt > 0.001 ? [{ tipo: '99', valor: nonBillingAmt, descricao: 'RETORNO SIMBOLICO' }] : []),
+          ],
+        },
 
       totalProdutos,
       totalFrete: freteValor,
@@ -1915,7 +2207,7 @@ export class NfeEmitService {
       cNFCode: (nfe as any).cNFCode ?? undefined,
       refNFe: (nfe as any).refNFe ?? undefined,
 
-      informacoesAdicionais: this.buildInfoAdic(itens, icmsSnRate, tpAmb, billingAmt, (nfe as any).refNFe, ibptRates, 'xml'),
+      informacoesAdicionais: this.buildInfoAdic(itens, icmsSnRate, tpAmb, billingAmt, (nfe as any).refNFe, ibptRates, 'xml', (nfe as any).informacoesAdicionais ?? undefined),
     }
 
     return emitDto
@@ -1929,6 +2221,7 @@ export class NfeEmitService {
     refNFe?: string,
     ibptRates?: { federalPct: number; estadualPct: number },
     format: 'xml' | 'pdf' = 'xml',
+    userText?: string,
   ): string | undefined {
     const homologParts: string[] = []
     if (tpAmb === '2') homologParts.push('AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL')
@@ -1975,30 +2268,20 @@ export class NfeEmitService {
       }
     }
 
-    // Crédito ICMS SN para CSOSN 900/101/201
-    let icmsPart = ''
-    const totalCredit = itens
-      .filter(i => ['101', '201', '900'].includes(i.impostos?.icms?.csosn ?? ''))
-      .reduce((acc, i) => acc + (i.impostos?.icms?.valor ?? 0), 0)
-    if (totalCredit > 0 && icmsSnRate > 0) {
-      const creditFmt = totalCredit.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-      icmsPart = `PERMITE O APROVEITAMENTO DO CREDITO DE ICMS NO VALOR DE R$ ${creditFmt} CORRESPONDENTE A ALIQUOTA DE ${icmsSnRate.toFixed(2)}% NOS TERMOS DO ART. 23 DA LEI COMPLEMENTAR 123/2006`
-    }
-
     // Tributos aproximados IBPT — calculados sobre itens faturáveis (exclui 5902)
     let tribPart = ''
     if (billingBase && billingBase > 0) {
       const federalPct = ibptRates?.federalPct ?? IBPT_FEDERAL_PCT
       const estadualPct = ibptRates?.estadualPct ?? IBPT_ESTADUAL_PCT
       const fmt = (v: number) => v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-      tribPart = `Trib. aprox R$ ${fmt(billingBase * federalPct / 100)} (${federalPct.toFixed(2)}%) Federal e R$ ${fmt(billingBase * estadualPct / 100)} (${estadualPct.toFixed(2)}%) Estadual Fonte: IBPT.`
+      tribPart = `TRIB. APROX R$ ${fmt(billingBase * federalPct / 100)} (${federalPct.toFixed(2)}%) FEDERAL E R$ ${fmt(billingBase * estadualPct / 100)} (${estadualPct.toFixed(2)}%) ESTADUAL FONTE: IBPT.`
     }
 
     if (format === 'pdf') {
       // Para o DANFE: texto principal no topo, ICMS+tributos ancorados na base
       const topLines: string[] = [...homologParts, ...devParts]
+      if (userText?.trim()) topLines.push(userText.trim())
       const bottomLines: string[] = []
-      if (icmsPart) bottomLines.push(icmsPart)
       if (tribPart) bottomLines.push(tribPart)
       return {
         top: topLines.length > 0 ? topLines.join('\n') : undefined,
@@ -2007,9 +2290,87 @@ export class NfeEmitService {
     } else {
       // Para o XML: separador |
       const all = [...homologParts, ...devParts]
-      if (icmsPart) all.push('', '', '', '', icmsPart) // 4 pipes de espaço
+      if (userText?.trim()) all.push(userText.trim())
       if (tribPart) { all.push('', tribPart) }
       return all.length > 0 ? all.join('|') : undefined
+    }
+  }
+
+  // ===========================================================
+  // Chamada SEFAZ — eventos (NFeRecepcaoEvento4)
+  // ===========================================================
+  private async callSefazEvento(
+    signedXml: string,
+    certBuffer: Buffer,
+    certPassword: string,
+  ): Promise<{ cStat: string; xMotivo: string; nProt: string | null }> {
+    const mode = getSefazEnv()
+
+    if (mode === 'simulator') {
+      this.logger.log('📋 SEFAZ em modo SIMULADOR — evento não transmitido')
+      return { cStat: '135', xMotivo: 'Evento registrado (simulação)', nProt: 'SIMULADO' }
+    }
+
+    // Extrai o elemento <envEvento> do XML assinado
+    const envEventoMatch = signedXml.match(/<envEvento\b[^>]*>[\s\S]*<\/envEvento>/)
+    if (!envEventoMatch) throw new BadRequestException('Não foi possível extrair envEvento do XML assinado')
+    const envEventoElement = envEventoMatch[0]
+
+    // Envelope SOAP 1.2 para NFeRecepcaoEvento4
+    const soapEnvelope = `<?xml version="1.0" encoding="utf-8"?><soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope"><soap12:Header><nfeCabecMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4"><cUF>${process.env.SEFAZ_UF ?? '35'}</cUF><versaoDados>1.00</versaoDados></nfeCabecMsg></soap12:Header><soap12:Body><nfeDadosMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4">${envEventoElement}</nfeDadosMsg></soap12:Body></soap12:Envelope>`
+
+    // HTTPS agent com certificado A1
+    const pfxDer = certBuffer.toString('binary')
+    const p12Asn1 = forge.asn1.fromDer(pfxDer)
+    const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, certPassword)
+    const keyBags = p12.getBags({ bagType: (forge.pki.oids as any).pkcs8ShroudedKeyBag })[(forge.pki.oids as any).pkcs8ShroudedKeyBag] ?? []
+    const certBags = p12.getBags({ bagType: (forge.pki.oids as any).certBag })[(forge.pki.oids as any).certBag] ?? []
+    const privateKeyPem = forge.pki.privateKeyToPem(keyBags[0].key!)
+    const certPem = forge.pki.certificateToPem(certBags[0].cert!)
+    const httpsAgent = new https.Agent({ key: privateKeyPem, cert: certPem, rejectUnauthorized: false })
+
+    const endpoints: Record<string, string> = {
+      homologacao: 'https://homologacao.nfe.fazenda.sp.gov.br/ws/NFeRecepcaoEvento4.asmx',
+      producao:    'https://nfe.fazenda.sp.gov.br/ws/NFeRecepcaoEvento4.asmx',
+    }
+    const url = endpoints[mode]
+
+    try {
+      const res = await axios.post(url, soapEnvelope, {
+        httpsAgent,
+        headers: { 'Content-Type': 'application/soap+xml; charset=utf-8', 'SOAPAction': '""' },
+        timeout: 30_000,
+      })
+      return await this.parseSefazEventoResponse(res.data)
+    } catch (err: any) {
+      const msg = err?.message ?? 'Erro de comunicação com SEFAZ'
+      this.logger.error(`❌ Erro ao enviar evento ao SEFAZ: ${msg}`)
+      throw new BadRequestException(`Falha na comunicação com SEFAZ: ${msg}`)
+    }
+  }
+
+  private async parseSefazEventoResponse(
+    soapXml: string,
+  ): Promise<{ cStat: string; xMotivo: string; nProt: string | null }> {
+    try {
+      const parsed = await xml2js.parseStringPromise(soapXml, { explicitArray: false })
+      const body = parsed?.['soap:Envelope']?.['soap:Body']
+                ?? parsed?.['soap12:Envelope']?.['soap12:Body']
+                ?? {}
+      const retEnvEvento = body?.['nfeResultMsg']?.['retEnvEvento']
+                        ?? (Object.values(body ?? {}) as any[])[0]?.['retEnvEvento']
+                        ?? {}
+      const infEvento = retEnvEvento?.retEvento?.infEvento
+                     ?? retEnvEvento?.['ns1:retEvento']?.['ns1:infEvento']
+                     ?? {}
+      const cStat: string = String(infEvento?.cStat ?? retEnvEvento?.cStat ?? 'ERRO')
+      const xMotivo: string = String(infEvento?.xMotivo ?? retEnvEvento?.xMotivo ?? 'Resposta não reconhecida')
+      const nProt: string | null = infEvento?.nProt ?? null
+      this.logger.log(`📡 SEFAZ evento resposta: cStat=${cStat} — ${xMotivo}`)
+      return { cStat, xMotivo, nProt }
+    } catch {
+      this.logger.warn('⚠️ Não foi possível parsear resposta SOAP do evento SEFAZ')
+      return { cStat: 'PARSE_ERROR', xMotivo: 'Erro ao interpretar resposta SEFAZ', nProt: null }
     }
   }
 

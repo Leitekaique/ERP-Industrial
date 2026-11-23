@@ -213,17 +213,18 @@ export function buildBillingPdf(d: BillingPdfData): Promise<Buffer> {
         .text(val, ML + lblW + 3, rowTextY(ly, h, 7.5), { width: leftW - lblW - 6, lineBreak: false })
     }
 
-    function leftRowDual(lbl1: string, val1: string, lbl2: string, val2: string, ly: number, h = 18) {
-      const half = leftW / 2
+    function leftRowDual(lbl1: string, val1: string, lbl2: string, val2: string, ly: number, h = 18, split = 0.5) {
+      const half = leftW * split
+      const half2 = leftW - half
       const lblW = half * 0.42
-      const lbl2W = half * 0.38
+      const lbl2W = half2 * 0.38
       const rx = ML + half
       const ty7 = rowTextY(ly, h, 7)
       const ty75 = rowTextY(ly, h, 7.5)
       // backgrounds first, then text (evita sobreposição)
       doc.rect(ML, ly, half, h).fillAndStroke('#F8F8F8', '#000')
       doc.rect(ML, ly, lblW, h).fillAndStroke('#F0F0F0', '#000')
-      doc.rect(rx, ly, half, h).fillAndStroke('#F8F8F8', '#000')
+      doc.rect(rx, ly, half2, h).fillAndStroke('#F8F8F8', '#000')
       doc.rect(rx, ly, lbl2W, h).fillAndStroke('#F0F0F0', '#000')
       // outer border por cima
       doc.rect(ML, ly, leftW, h).stroke('#000')
@@ -235,7 +236,7 @@ export function buildBillingPdf(d: BillingPdfData): Promise<Buffer> {
       doc.fontSize(7).font('Helvetica-Bold').fillColor('#000')
         .text(lbl2, rx + 3, ty7, { width: lbl2W - 4, lineBreak: false })
       doc.fontSize(7.5).font('Helvetica').fillColor('#000')
-        .text(val2, rx + lbl2W + 3, ty75, { width: half - lbl2W - 6, align: 'center', lineBreak: false })
+        .text(val2, rx + lbl2W + 3, ty75, { width: half2 - lbl2W - 6, align: 'center', lineBreak: false })
     }
 
     let ly = y
@@ -243,7 +244,7 @@ export function buildBillingPdf(d: BillingPdfData): Promise<Buffer> {
     ly += 18
     leftRow('ENDEREÇO', `${d.sacadoEndereco}${d.sacadoBairro ? ' - ' + d.sacadoBairro : ''}`, ly, 18)
     ly += 18
-    leftRowDual('MUNICÍPIO', d.sacadoCidade, 'ESTADO', d.sacadoEstado, ly, 18)
+    leftRowDual('MUNICÍPIO', d.sacadoCidade, 'ESTADO', d.sacadoEstado, ly, 18, 0.72)
     ly += 18
     leftRowDual('END. COBRANÇA', d.sacadoEndCobranca ?? 'O MESMO', 'CEP', d.sacadoCep, ly, 22)
     ly += 22

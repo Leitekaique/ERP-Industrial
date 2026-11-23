@@ -3,6 +3,7 @@ import { useProcesses, useDeleteProcess } from '../../lib/useProcesses'
 import { useNavigate } from 'react-router-dom'
 import { PageHeader } from '../../components/ui/PageHeader'
 import { EmptyState } from '../../components/ui/EmptyState'
+import { SearchableSelect } from '../../components/ui/SearchableSelect'
 
 type SortKey = 'name' | 'artigo' | 'forro' | 'cola' | 'empresaNome' | 'price' | 'unit' | 'active'
 
@@ -85,16 +86,17 @@ export default function ProcessesList() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <select
-          className="border rounded px-3 py-2 text-sm"
+        <SearchableSelect
           value={empresaFiltro}
-          onChange={(e) => setEmpresaFiltro(e.target.value)}
-        >
-          <option value="">Todas as empresas</option>
-          {empresasDisponiveis.map(([id, nome]) => (
-            <option key={id} value={id}>{nome}</option>
-          ))}
-        </select>
+          onChange={setEmpresaFiltro}
+          placeholder="Todas as empresas"
+          emptyLabel="Todas as empresas"
+          className="w-56"
+          options={empresasDisponiveis.map(([id, nome]) => ({
+            value: id,
+            label: nome,
+          }))}
+        />
         <select
           className="border rounded px-3 py-2 text-sm"
           value={ativoFiltro}

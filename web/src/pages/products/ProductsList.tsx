@@ -1,17 +1,20 @@
 import { useEffect, useState, useMemo } from 'react'
 import { useApi } from '../../lib/useApi'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { PageHeader } from '../../components/ui/PageHeader'
 import { EmptyState } from '../../components/ui/EmptyState'
+import { SearchableSelect } from '../../components/ui/SearchableSelect'
 
 export default function ProductsList() {
   const api = useApi()
   const nav = useNavigate()
+  const location = useLocation()
+  const savedState = (location.state as any) ?? {}
 
   const [products, setProducts] = useState<any[]>([])
-  const [search, setSearch] = useState('')
-  const [empresaFiltro, setEmpresaFiltro] = useState('')
-  const [processoFiltro, setProcessoFiltro] = useState('')
+  const [search, setSearch] = useState(savedState.search ?? '')
+  const [empresaFiltro, setEmpresaFiltro] = useState(savedState.empresaFiltro ?? '')
+  const [processoFiltro, setProcessoFiltro] = useState(savedState.processoFiltro ?? '')
   const [tenantId] = useState('T-001')
   const [companyId] = useState('C-001')
 
@@ -74,7 +77,7 @@ export default function ProductsList() {
       })
     }
     return sorted
-  }, [products, sortConfig])
+  }, [products, sortConfig, empresaFiltro, processoFiltro])
 
   const totalPages = Math.ceil(sortedProducts.length / pageSize)
   const paginatedProducts = useMemo(() => {
@@ -114,22 +117,22 @@ export default function ProductsList() {
           placeholder="Buscar por nome / SKU"
           className="border rounded px-3 py-2 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-tapajos-500"
         />
-        <select
-          className="border rounded px-2 py-2 text-sm"
+        <SearchableSelect
           value={empresaFiltro}
-          onChange={e => setEmpresaFiltro(e.target.value)}
-        >
-          <option value="">Todas as empresas</option>
-          {empresasDisponiveis.map(n => <option key={n} value={n}>{n}</option>)}
-        </select>
-        <select
-          className="border rounded px-2 py-2 text-sm"
+          onChange={setEmpresaFiltro}
+          placeholder="Todas as empresas"
+          emptyLabel="Todas as empresas"
+          className="w-56"
+          options={empresasDisponiveis.map(n => ({ value: n, label: n }))}
+        />
+        <SearchableSelect
           value={processoFiltro}
-          onChange={e => setProcessoFiltro(e.target.value)}
-        >
-          <option value="">Todos os processos</option>
-          {processosDisponiveis.map(p => <option key={p} value={p}>{p}</option>)}
-        </select>
+          onChange={setProcessoFiltro}
+          placeholder="Todos os processos"
+          emptyLabel="Todos os processos"
+          className="w-48"
+          options={processosDisponiveis.map(p => ({ value: p, label: p }))}
+        />
         <button
           onClick={fetchProducts}
           className="px-3 py-2 bg-tapajos-700 text-white rounded text-sm hover:bg-tapajos-800"
@@ -195,7 +198,7 @@ export default function ProductsList() {
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-3">
                       <button
-                        onClick={() => nav(`/products/${p.id}`)}
+                        onClick={() => nav(`/products/${p.id}`, { state: { empresaFiltro, processoFiltro, search } })}
                         className="text-xs text-tapajos-600 hover:text-tapajos-800 font-medium"
                       >
                         Editar

@@ -8,4 +8,10 @@ export class HealthController {
   get() {
     return { ok: true, uptime: process.uptime(), timestamp: new Date().toISOString() }
   }
+
+  @Public()
+  @Get('config')
+  config() {
+    return { sefazEnv: process.env.SEFAZ_ENV ?? 'producao' }
+  }
 }

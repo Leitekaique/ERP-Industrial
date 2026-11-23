@@ -44,17 +44,28 @@ export default function StockPage() {
   const { data = [], isLoading } = useStockBalance({})
   const queryClient = useQueryClient()
 
+  const ITEMS_PER_PAGE = 20
+
   const [groupMode, setGroupMode] = useState<GroupMode>('empresa')
   const [selected, setSelected] = useState<Record<string, boolean>>({})
   const [convertItem, setConvertItem] = useState<any | null>(null)
   const [expandedEmpresas, setExpandedEmpresas] = useState<Record<string, boolean>>({})
   const [expandedSubs, setExpandedSubs] = useState<Record<string, boolean>>({})
+  const [groupShownCount, setGroupShownCount] = useState<Record<string, number>>({})
   const [search, setSearch] = useState('')
   const preview = useNfePreviewFromStock()
   const nav = useNavigate()
 
   const toggleEmpresa = (empresa: string) => {
+    // default false (colapsado)
     setExpandedEmpresas(prev => ({ ...prev, [empresa]: !prev[empresa] }))
+  }
+
+  const showMoreInGroup = (empresa: string, total: number) => {
+    setGroupShownCount(prev => ({
+      ...prev,
+      [empresa]: Math.min((prev[empresa] ?? ITEMS_PER_PAGE) + ITEMS_PER_PAGE, total),
+    }))
   }
 
   const toggleSub = (key: string) => {
@@ -97,7 +108,8 @@ export default function StockPage() {
     })
 
     Object.entries(byEmpresa).forEach(([empresa, items]) => {
-      const isExpanded = expandedEmpresas[empresa] ?? true
+      // default: colapsado (false) — expandedEmpresas[empresa] ?? false
+      const isExpanded = expandedEmpresas[empresa] ?? false
       const empresaChildIds = items.map(i => i.id)
       const totalQtdEmpresa = items.reduce((acc, i) => acc + Number(i.onHand ?? 0), 0)
 
@@ -114,7 +126,19 @@ export default function StockPage() {
       if (!isExpanded) return
 
       if (groupMode === 'empresa') {
-        items.forEach(i => result.push(i))
+        // Paginação: mostrar até groupShownCount[empresa] items
+        const limit = groupShownCount[empresa] ?? ITEMS_PER_PAGE
+        const visible = items.slice(0, limit)
+        visible.forEach(i => result.push(i))
+        if (items.length > limit) {
+          result.push({
+            __showMore: true,
+            empresa,
+            shown: limit,
+            total: items.length,
+            remaining: items.length - limit,
+          })
+        }
         return
       }
 
@@ -149,7 +173,7 @@ export default function StockPage() {
     })
 
     return result
-  }, [data, groupMode, expandedEmpresas, expandedSubs, search])
+  }, [data, groupMode, expandedEmpresas, expandedSubs, groupShownCount, search, ITEMS_PER_PAGE])
 
 	const selectedLotIds = useMemo(
 	  () => Object.entries(selected).filter(([, v]) => v).map(([id]) => id),
@@ -290,6 +314,24 @@ export default function StockPage() {
                 }
 
                 // =========================
+                // VER MAIS (paginação intra-grupo)
+                // =========================
+                if (row.__showMore) {
+                  return (
+                    <tr key={`more_${row.empresa}`} className="bg-white">
+                      <td colSpan={10} className="px-8 py-2">
+                        <button
+                          className="text-sm text-tapajos-600 hover:text-tapajos-800 hover:underline"
+                          onClick={() => showMoreInGroup(row.empresa, row.total)}
+                        >
+                          Ver mais {row.remaining} item(ns) de {row.total} no total
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                }
+
+                // =========================
                 // GRUPO: SUB (PROCESSO / NF)
                 // =========================
                 if (row.__group && row.level === 'sub') {
@@ -386,6 +428,7 @@ export default function StockPage() {
                                 state: {
                                   unit: row.unit,
                                   empresaOrigemId: row.empresaId,
+                                  fromList: true,
                                 },
                               })
                             }
@@ -395,7 +438,7 @@ export default function StockPage() {
 
                           <button
                             className="px-2 py-1 rounded border text-xs bg-amber-50 hover:bg-amber-100 text-amber-800"
-                            onClick={() => nav(`/inventory/stock/${row.productId}/history`)}
+                            onClick={() => nav(`/inventory/stock/lot/${row.id}/movements`)}
                           >
                             Histórico
                           </button>

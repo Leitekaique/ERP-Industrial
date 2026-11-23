@@ -103,7 +103,7 @@ model Customer {
   updatedAt       DateTime        @default(now()) @updatedAt
   docType         String?
   paymentTermDay  Int?            // Legado — mantido para compatibilidade
-  billingTerms    String?         // Prazo de cobrança: "dia15"|"dia20"|"7d"|"15d"|"28d"|"45d"
+  billingTerms    String?         // Prazo de cobrança: "dia15"|"dia20"|"0d"|"7d"|"15d"|"28d"|"45d"
   accountantEmail String?         // E-mail do contador (campo global Tapajós — não exibir no form do cliente)
   company         Company         @relation(fields: [companyId], references: [id])
   tenant          Tenant          @relation(fields: [tenantId], references: [id])
@@ -253,6 +253,7 @@ model Nfe {
   // =========================
   cNFCode            String?          // cNF: 8 dígitos, gerado 1x e persistido (evita chave inconsistente)
   refNFe             String?          // NFref: chave da NF de entrada referenciada (obrigatório para CFOP 5902)
+  informacoesAdicionais String?       // infCpl: texto extra do usuário, concatenado ao infCpl gerado automaticamente
 
   // =========================
   // ✅ Cobrança (fat/dup)
