@@ -19,7 +19,7 @@
 10. [Preparação para Deploy em Produção](#10-preparação-para-deploy-em-produção)
 11. [Backup e Recuperação](#11-backup-e-recuperação)
 12. [Estrutura de Arquivos Importantes](#12-estrutura-de-arquivos-importantes)
-13. [Suporte Remoto: Logs, Sentry e Tailscale](#13-suporte-remoto-logs-sentry-e-tailscale)
+13. [Suporte Remoto: Logs, Sentry e Tailscale](#13-suporte-remoto-logs-sentry-e-tailscale) — roteiro de atualização/suporte pelo SSH em 13.7
 14. [Atualização do Cliente: Pipeline de Versões](#14-atualização-do-cliente-pipeline-de-versões)
 
 ---
@@ -1015,6 +1015,94 @@ Arquivos antigos (`.log.gz`): abra com o 7-Zip, ou no Git Bash use `zcat api-202
    remoto para suporte e que os logs ficam no PC dele. Isso é boa prática de LGPD.
 6. **Revogar acesso:** se o notebook for perdido ou roubado, remova-o em
    <https://login.tailscale.com/admin/machines> (**⋯ → Remove**).
+
+### 13.7 Roteiro: atualizar e dar suporte pelo SSH (sem AnyDesk)
+
+Situação do cliente (desde 24/11/2026): PC `tapajos-erp` (Windows Pro) no tailnet, com
+"Run unattended" ligado e OpenSSH Server instalado. Usuário do Windows: `Usuario`.
+
+**Antes de começar**
+
+- O PC do cliente precisa estar **ligado e com alguém logado no Windows**. O Tailscale
+  conecta sozinho no boot, mas o **Docker Desktop só sobe quando o usuário entra**.
+- O Tailscale do notebook precisa estar ligado (ícone perto do relógio → *Connected*).
+- Para **atualizar**, combine um horário: o ERP fica fora do ar de 1 a 2 minutos
+  (ninguém emitindo NF nesse momento). Para só **ler logs**, não precisa avisar.
+
+**1. Testar se o PC está acessível** (no notebook)
+
+```powershell
+ping tapajos-erp
+```
+
+"Esgotado o tempo limite" = PC desligado (ou Tailscale de lá desconectado). Peça para
+ligarem o PC e entrarem no Windows.
+
+**2. Entrar**
+
+```powershell
+ssh Usuario@tapajos-erp
+```
+
+Digite a senha do Windows do cliente (não aparece nada enquanto digita). O prompt vira
+`usuario@DESKTOP-XXXX C:\Users\Usuario>` — daí em diante tudo roda **no PC do cliente**.
+O SSH abre o **cmd**, não o PowerShell: digite `powershell` se precisar de `Get-Content`,
+`Select-String` etc. Para sair: `exit`.
+
+**3. Conferir o Docker**
+
+```
+docker ps
+```
+
+Devem aparecer `erp_api`, `erp_db` e `erp_web`. Erro dizendo que o Docker não está rodando
+→ peça para alguém no cliente abrir o **Docker Desktop** (pelo SSH não dá para abrir
+programas com janela).
+
+**4. Atualizar** (só quando houver versão nova publicada — seção 14.2)
+
+```
+cd C:\ERP-Deploy
+ATUALIZAR_ERP.bat -Versao v1.1.1
+```
+
+Espere **"ERP Tapajos atualizado para v1.1.1"** e aperte Enter no "Pressione qualquer
+tecla". Conferência:
+
+```
+docker logs erp_api --since 5m 2>&1 | findstr "Seed escutando"
+```
+
+Deve mostrar `Seed já aplicado anteriormente (1 empresa(s))` e `API escutando ... (Sentry ativo)`.
+Peça ao cliente **Ctrl+F5** no navegador e confira a versão na barra lateral.
+
+Deu errado? Volte para a anterior (o número fica em `versao-anterior.txt`):
+
+```
+ATUALIZAR_ERP.bat -Versao v1.1.0
+```
+
+**5. Suporte do dia a dia** (dentro do SSH, no cmd)
+
+| Para quê | Comando |
+|---|---|
+| O que aconteceu na última hora | `docker logs erp_api --since 1h` |
+| Só os erros da última hora | `docker logs erp_api --since 1h 2>&1 \| findstr ERROR` |
+| Acompanhar ao vivo (Ctrl+C sai) | `docker logs erp_api -f --since 1m` |
+| Arquivos de log por dia | `dir C:\ERP-Deploy\logs` |
+| Últimas linhas do log de hoje (UTC!) | `powershell -Command "Get-Content C:\ERP-Deploy\logs\api-$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')).log -Tail 20"` |
+| Tudo de pé? | `docker ps` |
+| Último backup diário | `dir C:\ERP-Deploy\backups /O-D` |
+
+Também dá para rodar um comando só, sem entrar, direto do notebook:
+
+```powershell
+ssh Usuario@tapajos-erp "docker logs erp_api --since 30m"
+```
+
+> Lembrete: os horários do log estão em **UTC** (Brasília + 3h). "Deu erro às 14h" →
+> procure `17:` no log. Depois das 21h de Brasília as linhas já vão para o arquivo do
+> dia seguinte.
 
 ---
 
