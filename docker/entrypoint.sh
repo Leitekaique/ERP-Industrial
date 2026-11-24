@@ -31,17 +31,31 @@ npx prisma migrate deploy --schema=./prisma/schema.prisma
 # 🌱 Executa seed apenas se a Company não existir
 # --------------------------------------------------------
 echo "🌱 Verificando se seed inicial é necessário..."
-COMPANY_COUNT=$(npx prisma db execute --schema=./prisma/schema.prisma --stdin <<'SQL'
-SELECT COUNT(*) FROM "Company";
-SQL
-)
+# O "prisma db execute" NÃO devolve o resultado do SELECT (só "Script executed
+# successfully."), por isso a contagem é feita com o Prisma Client.
+# Imprime o número de empresas, ou -1 se não conseguir contar.
+COMPANY_COUNT=$(node -e "
+const { PrismaClient } = require('@prisma/client');
+const p = new PrismaClient();
+p.company.count()
+  .then((n) => console.log(n))
+  .catch(() => console.log(-1))
+  .finally(() => p.\$disconnect());
+" 2>/dev/null | tail -n 1)
 
-if [ "$COMPANY_COUNT" -eq 0 ]; then
-  echo "🌱 Nenhuma empresa encontrada. Rodando seed inicial..."
-  node prisma/seed.cjs
-else
-  echo "✅ Seed já aplicado anteriormente."
-fi
+case "$COMPANY_COUNT" in
+  0)
+    echo "🌱 Nenhuma empresa encontrada. Rodando seed inicial..."
+    node prisma/seed.cjs
+    ;;
+  ''|-1|*[!0-9]*)
+    # Na dúvida, NÃO roda o seed (rodar seed num banco com dados seria pior)
+    echo "⚠️ Não foi possível contar as empresas ($COMPANY_COUNT). Seed NÃO executado."
+    ;;
+  *)
+    echo "✅ Seed já aplicado anteriormente ($COMPANY_COUNT empresa(s))."
+    ;;
+esac
 
 echo "------------------------------------------"
 echo "🏁 Iniciando servidor NestJS..."

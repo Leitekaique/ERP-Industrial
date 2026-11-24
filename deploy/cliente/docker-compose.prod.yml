@@ -23,9 +23,11 @@ services:
       POSTGRES_DB: erp
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      # Só o próprio PC acessa o banco (antes: qualquer máquina da rede local)
-      - "127.0.0.1:5432:5432"
+    # SEM "ports": o banco não é publicado fora do Docker. A API e os backups
+    # falam com ele pela rede interna (db:5432) / docker exec. Para consultar:
+    #   docker exec -it erp_db psql -U postgres -d erp
+    # (Em 24/11/2026 o "127.0.0.1:5432:5432" falhou no PC do cliente com
+    #  "bind: ... forbidden by its access permissions" e derrubou o banco.)
     networks:
       - erp_network
 

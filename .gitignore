@@ -74,6 +74,10 @@ limpar-nfe-hoje.sql
 
 # Dumps do banco (dados reais de clientes) — nunca versionar
 backup_banco*.sql
+# Qualquer .sql ou diagnóstico solto na RAIZ (ex.: backup trazido do cliente).
+# Scripts versionados ficam em scripts/, docs/ e prisma/, que não são afetados.
+/*.sql
+/diagnostico*.txt
 
 # Documentos internos com dados reais (clientes, preços, NFs) — ficam só na máquina
 versionamento.md

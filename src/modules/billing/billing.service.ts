@@ -419,18 +419,6 @@ export class BillingService {
     })
   }
 
-  // ── Corrige NFs canceladas que ainda estão no A Receber / em faturas ───────
-  // simular=true mostra o que mudaria sem gravar nada
-  async reconciliarCanceladas(params: { tenantId: string; companyId: string; simular?: boolean }) {
-    const r = await reconciliarNfsCanceladas(this.prisma, params)
-    this.logger.log(
-      `🔎 Reconciliação NFs canceladas (${r.simulacao ? 'simulação' : 'aplicada'}): ` +
-      `${r.nfsCorrigidas.length} NF(s), ${r.recebiveisCancelados} recebível(is) cancelado(s), ` +
-      `${r.recebiveisAjustados} ajustado(s), ${r.faturasRecalculadas.length} fatura(s)`
-    )
-    return r
-  }
-
   // ── Recebíveis em aberto sem fatura (a12) ─────────────────────────────────
   async getUnbilledReceivables(tenantId: string, companyId: string) {
     const receivables = await this.prisma.receivable.findMany({

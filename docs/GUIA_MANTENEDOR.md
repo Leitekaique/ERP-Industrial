@@ -996,15 +996,18 @@ Arquivos antigos (`.log.gz`): abra com o 7-Zip, ou no Git Bash use `zcat api-202
    # antes
        ports:
          - "5432:5432"
-   # depois: remover as duas linhas acima, ou, se precisar acessar do próprio PC:
-       ports:
-         - "127.0.0.1:5432:5432"
+   # depois: remover as duas linhas acima (sem "ports" no serviço db)
    ```
+   Evite `127.0.0.1:5432:5432` no Windows: no PC do cliente essa forma foi recusada pelo
+   sistema e impediu o banco de subir (veja a nota abaixo).
    Para consultar o banco depois disso, entre por SSH e use
    `docker exec -it erp_db psql -U postgres -d erp`. Num segundo momento, troque também a
    senha padrão `postgres`.
-   *(Aplicada no compose do pipeline novo, `deploy/cliente/docker-compose.prod.yml`, com
-   `127.0.0.1:5432:5432` — vale a partir da primeira atualização pelo modelo novo; ver seção 14.)*
+   *(Aplicada no compose do pipeline novo, `deploy/cliente/docker-compose.prod.yml`,
+   **removendo** a porta. A primeira tentativa, `127.0.0.1:5432:5432`, falhou no PC do
+   cliente em 24/11/2026 com `bind: An attempt was made to access a socket in a way forbidden
+   by its access permissions` — o Windows recusou a porta e o banco não subiu. Sem `ports`
+   não há esse risco.)*
 2. **Não use** os recursos *Tailscale Funnel* / *Serve*: eles publicam serviços na internet.
 3. **2FA** na conta usada no Tailscale e no Sentry.
 4. **Senha forte** no usuário do Windows do cliente (exigida pela Área de Trabalho Remota) e, no SSH, prefira chave.

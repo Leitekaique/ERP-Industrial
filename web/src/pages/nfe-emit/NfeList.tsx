@@ -142,42 +142,9 @@ export default function NfeList() {
   const pageCount = Math.ceil(sorted.length / PAGE_SIZE)
   const paged = sorted.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
 
-  // Regera o XML de distribuição (nfeProc = NF + protocolo SEFAZ) das NFs
-  // emitidas antes da correção. Consulta a SEFAZ uma NF por vez.
-  const [regenerando, setRegenerando] = useState(false)
-  async function corrigirXmls() {
-    if (!confirm(
-      'Corrigir os XMLs que estão sem o protocolo de autorização da SEFAZ?\n\n' +
-      'O sistema consulta cada NF na SEFAZ (pode levar alguns minutos) e guarda uma cópia dos arquivos originais. Nenhum e-mail é enviado.'
-    )) return
-    setRegenerando(true)
-    try {
-      const { data: r } = await api.post('/nfe-emit/regenerar-xml-pendentes', { tenantId, companyId }, { timeout: 0 })
-      const erros = (r.erros ?? []).map((e: any) => `NF ${e.numero}: ${e.motivo}`).join('\n')
-      alert(
-        r.total === 0
-          ? 'Todos os XMLs já estão com o protocolo da SEFAZ.'
-          : `XMLs corrigidos: ${r.atualizadas} de ${r.total} NF(s)\nEventos (cancelamento/CC-e) corrigidos: ${r.eventosAtualizados}` +
-            (erros ? `\n\nNão foi possível corrigir:\n${erros}` : '')
-      )
-    } catch (err: any) {
-      alert(`Erro ao corrigir XMLs: ${err?.response?.data?.message ?? err?.message ?? 'sem conexão'}`)
-    } finally {
-      setRegenerando(false)
-    }
-  }
-
   return (
     <div className="space-y-4">
       <PageHeader title="Emissão NF-e" sub="Notas fiscais emitidas">
-        <button
-          onClick={corrigirXmls}
-          disabled={regenerando}
-          title="Adiciona o protocolo de autorização da SEFAZ (nfeProc) aos XMLs emitidos antes da correção"
-          className="px-3 py-2 border border-slate-300 rounded text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-        >
-          {regenerando ? 'Corrigindo XMLs…' : 'Corrigir XMLs (protocolo)'}
-        </button>
         <button
           onClick={() => navigate('/nfe-emit/form')}
           className="px-3 py-2 bg-tapajos-600 text-white rounded text-sm hover:bg-tapajos-700"

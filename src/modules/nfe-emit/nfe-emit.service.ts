@@ -2376,45 +2376,6 @@ export class NfeEmitService {
     return { numero: nfe.number, nfe: nfeResultado, eventosAtualizados, situacaoSefaz: xMotivo, emailEnviado }
   }
 
-  // Regera todas as NFs (autorizadas/canceladas) cujo XML ainda não tem protocolo.
-  // Sequencial e com pausa entre consultas para não acionar o bloqueio por
-  // consumo indevido da SEFAZ (cStat 656). Não envia e-mails.
-  async regenerarXmlsPendentes(tenantId: string, companyId: string) {
-    if (getSefazEnv() === 'simulator') {
-      throw new BadRequestException('Corrigir XMLs exige SEFAZ real (indisponível no modo simulador).')
-    }
-    const nfes = await this.prisma.nfe.findMany({
-      where: { tenantId, companyId, status: { in: ['authorized', 'canceled'] as any[] }, xmlPath: { not: null } },
-      include: { events: true },
-      orderBy: { number: 'asc' },
-    })
-
-    const pendentes = nfes.filter(n => {
-      const abs = path.resolve(n.xmlPath!)
-      if (!fs.existsSync(abs)) return false
-      if (!isNfeProc(fs.readFileSync(abs, 'utf-8'))) return true
-      return (n as any).events?.some((e: any) => {
-        const p = (e.payload as any)?.xmlPath
-        return e.status === 'authorized' && p && fs.existsSync(path.resolve(p)) &&
-          !isProcEvento(fs.readFileSync(path.resolve(p), 'utf-8'))
-      })
-    })
-
-    const resultado = { total: pendentes.length, atualizadas: 0, eventosAtualizados: 0, erros: [] as { numero: any; motivo: string }[] }
-    for (const n of pendentes) {
-      try {
-        const r = await this.regenerarXmlAutorizado(n.id)
-        if (r.nfe === 'atualizado') resultado.atualizadas++
-        resultado.eventosAtualizados += r.eventosAtualizados
-      } catch (e: any) {
-        resultado.erros.push({ numero: n.number, motivo: e?.message ?? String(e) })
-      }
-      await new Promise(r => setTimeout(r, 500))
-    }
-    this.logger.log(`🔁 Regeração em lote: ${resultado.atualizadas}/${resultado.total} NFs, ${resultado.eventosAtualizados} eventos, ${resultado.erros.length} erro(s)`)
-    return resultado
-  }
-
   // Guarda o arquivo original antes de sobrescrever (pasta backup_sem_protocolo)
   private backupXmlSemProtocolo(absPath: string) {
     const dir = path.join(path.dirname(absPath), 'backup_sem_protocolo')

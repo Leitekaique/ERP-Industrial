@@ -164,18 +164,6 @@ export class NfeEmitController {
     return this.nfeService.regenerarXmlAutorizado(id, { enviarEmail: !!enviarEmail })
   }
 
-  // Regera em lote todas as NFs cujo XML ainda não tem o protocolo SEFAZ
-  @Post('regenerar-xml-pendentes')
-  async regenerarXmlPendentes(
-    @Body('tenantId') tenantId?: string,
-    @Body('companyId') companyId?: string,
-  ) {
-    return this.nfeService.regenerarXmlsPendentes(
-      tenantId || DEFAULT_TENANT_ID,
-      companyId || DEFAULT_COMPANY_ID,
-    )
-  }
-
   @Get(':id/eventos')
   async listEventos(@Param('id') id: string) {
     return this.nfeService.listEventos(id)
